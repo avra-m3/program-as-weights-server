@@ -22,12 +22,10 @@ dependencies = [
 ]
 
 [project.scripts]
-paw-re-server = "paw_re_server:main"
-paw-local = "paw_local.cli:main"
 paw-server = "paw_server.cli:main"
 
 [tool.uv.build-backend]
-module-name = ["paw_re_server", "paw_local", "paw_server"]
+module-name = ["paw_server"]
 
 [[tool.uv.index]]
 url = "https://pypi.programasweights.com/simple/"
@@ -61,10 +59,10 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # Prompt templates are verbatim from the PAW paper/research code; keep as-is.
-"src/paw_local/prompts.py" = ["E501"]
+"src/paw_server/compile/prompts.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["paw_re_server", "paw_local"]
+known-first-party = ["paw_server"]
 
 [tool.black]
 line-length = 88

@@ -26,9 +26,9 @@ def client(tmp_path, monkeypatch):
         (out_dir / "adapter_config.json").write_text("{}")
         return out_dir
 
-    import paw_local.pipeline
+    import paw_server.compile.pipeline
 
-    monkeypatch.setattr(paw_local.pipeline, "compile_spec", fake_compile_spec)
+    monkeypatch.setattr(paw_server.compile.pipeline, "compile_spec", fake_compile_spec)
     return TestClient(create_app(tmp_path / "server"))
 
 

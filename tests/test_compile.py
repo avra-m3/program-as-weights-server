@@ -2,9 +2,9 @@
 
 import torch
 
-from paw_local.mapper import LoraMapper, depth_ratio_layers
-from paw_local.pipeline import MODULE_PARENT, interpreter_module_dims
-from paw_local.prompts import compiler_prompt, interpreter_prompt
+from paw_server.compile.mapper import LoraMapper, depth_ratio_layers
+from paw_server.compile.pipeline import MODULE_PARENT, interpreter_module_dims
+from paw_server.compile.prompts import compiler_prompt, interpreter_prompt
 
 QWEN3_06B_DIMS = {
     "q_proj": (1024, 2048),
@@ -109,7 +109,7 @@ def test_interpreter_module_dims_qwen3_06b():
 def test_gguf_adapter_roundtrip(tmp_path):
     import gguf
 
-    from paw_local.gguf_export import write_gguf_adapter
+    from paw_server.compile.gguf_export import write_gguf_adapter
 
     lora = {
         (0, "q_proj"): (torch.randn(64, 1024), torch.randn(2048, 64)),
