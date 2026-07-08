@@ -100,10 +100,26 @@ def _load_model(repo: str, device: str, subfolder: str | None = None):
 
     Loading to CPU and then .to(device) doubles peak memory (~16 GB for the
     4B models) and can push a 24 GB machine deep into swap.
+
+    On CUDA we use ``device_map="auto"`` with a 1 GiB headroom so that
+    accelerate can offload layers to CPU when the model is too large for
+    the GPU.  Without the headroom the 4B pseudo compiler (~7.5 GiB in
+    bf16) can OOM during weight-materialization on 8 GiB cards because
+    intermediate copies briefly push memory past the limit.
     """
-    kwargs = {"dtype": torch.bfloat16, "device_map": device}
+    kwargs: dict = {"dtype": torch.bfloat16}
     if subfolder:
         kwargs["subfolder"] = subfolder
+
+    if device == "cuda":
+        kwargs["device_map"] = "auto"
+        total_bytes = torch.cuda.get_device_properties(0).total_memory
+        # Reserve 1 GiB for loading intermediates and KV cache.
+        max_gpu = max(int(total_bytes) - 1024 * 1024 * 1024, 0)
+        kwargs["max_memory"] = {0: str(max_gpu), "cpu": "96GiB"}
+    else:
+        kwargs["device_map"] = device
+
     model = AutoModelForCausalLM.from_pretrained(repo, **kwargs)
     return model.eval()
 
