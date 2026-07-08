@@ -26,15 +26,22 @@ server implements) see [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 uv sync
 ```
 
-This installs `programasweights` (kept as a dependency so the SDK example
-below is runnable from this project's venv) plus dev tooling.
+This installs the server and its compile pipeline's dependencies (torch,
+transformers, etc.) plus dev tooling. It does **not** install the official
+`programasweights` SDK — that package pulls in `llama-cpp-python`, which has
+no prebuilt wheel for Linux/arm64, and isn't needed to run the server itself.
+Install it separately only if you want to run the SDK example below:
 
-Optional: copy `.env.example` to `.env` to tweak local behavior —
-`PAW_GPU_LAYERS` (force CPU-only if GPU/Metal/CUDA causes issues) and
-`PAW_CACHE_DIR` (where the SDK caches downloaded models/programs). Note that
-`.env.example`'s `PAW_API_KEY` is for signing in to the *hosted*
-programasweights.com service and has no effect on this self-hosted server —
-there's no login or rate limit here.
+```bash
+uv pip install programasweights
+```
+
+Optional: copy `.env.example` to `.env` to tweak the *SDK's* local behavior
+if you've installed it separately — `PAW_GPU_LAYERS` (force CPU-only if
+GPU/Metal/CUDA causes issues) and `PAW_CACHE_DIR` (where the SDK caches
+downloaded models/programs). Note that `.env.example`'s `PAW_API_KEY` is for
+signing in to the *hosted* programasweights.com service and has no effect on
+this self-hosted server — there's no login or rate limit here.
 
 ## Run
 
@@ -94,6 +101,9 @@ curl -OJ http://127.0.0.1:8100/api/v1/programs/<program_id>/download
 ```
 
 ### 2. The official SDK, pointed at this server
+
+Requires installing the SDK separately (`uv pip install programasweights` —
+see [Setup](#setup)):
 
 ```bash
 PAW_API_URL=http://127.0.0.1:8100 uv run python -c "
