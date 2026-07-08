@@ -6,6 +6,8 @@ from paw_server.compile.mapper import LoraMapper, depth_ratio_layers
 from paw_server.compile.pipeline import (
     _DEFAULT_CUDA_RUNTIME_RESERVE_GB,
     MODULE_PARENT,
+    PREFIX_STEPS,
+    _capture_prefix_hidden,
     _cuda_runtime_reserve_bytes,
     _input_device,
     interpreter_module_dims,
@@ -179,9 +181,7 @@ def test_input_device_sharded_embedding_on_gpu():
 def test_input_device_sharded_embedding_offloaded_to_cpu():
     # The edge case the fix targets: a tight GPU pushes the embedding to CPU,
     # so inputs must be on CPU (hardcoding "cuda" would device-mismatch).
-    model = _FakeModel(
-        hf_device_map={"model.embed_tokens": "cpu", "model.layers.0": 0}
-    )
+    model = _FakeModel(hf_device_map={"model.embed_tokens": "cpu", "model.layers.0": 0})
     assert _input_device(model, "cuda") == torch.device("cpu")
 
 
@@ -210,6 +210,84 @@ def test_cuda_runtime_reserve_blank_env_falls_back_to_default(monkeypatch):
     assert _cuda_runtime_reserve_bytes() == int(
         _DEFAULT_CUDA_RUNTIME_RESERVE_GB * 1024**3
     )
+
+
+def _tiny_qwen3():
+    """A tiny, randomly-initialised Qwen3 causal LM (no download)."""
+    import torch as _torch
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    _torch.manual_seed(0)
+    cfg = Qwen3Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=128,
+    )
+    return Qwen3ForCausalLM(cfg).eval()
+
+
+def test_capture_prefix_hidden_matches_output_hidden_states():
+    """The hook-based capture must reproduce output_hidden_states EXACTLY.
+
+    Regression guard for the bug where the final teacher layer was captured
+    PRE-final-norm (raw decoder output) instead of POST-norm. transformers
+    ties hidden_states[-1] to last_hidden_state (post model.norm), and the
+    mapper was trained on that; feeding the pre-norm residual corrupts the
+    LoRA and makes the interpreter emit a single repeated token. Because
+    depth_ratio_layers always maps the last student layer onto the final
+    teacher layer, this must match at every slot -- especially the last.
+    """
+    model = _tiny_qwen3()
+    num_teacher = model.config.num_hidden_layers
+    ids = torch.randint(0, 64, (1, PREFIX_STEPS + 4))
+
+    # Include the final layer (the previously-broken case) plus a duplicate,
+    # mirroring how depth_ratio_layers can repeat teacher indices.
+    teacher_layers = [0, 1, num_teacher - 1, num_teacher - 1]
+
+    with torch.no_grad():
+        out = model.model(input_ids=ids, output_hidden_states=True, use_cache=False)
+    reference = [
+        out.hidden_states[t + 1][0, -PREFIX_STEPS:, :].float().cpu()
+        for t in teacher_layers
+    ]
+
+    captured = _capture_prefix_hidden(model, ids, teacher_layers)
+
+    assert len(captured) == len(teacher_layers)
+    for slot, (ref, got) in enumerate(zip(reference, captured, strict=True)):
+        assert torch.allclose(ref, got, atol=1e-5), (
+            f"slot {slot} (teacher layer {teacher_layers[slot]}) diverges from "
+            f"output_hidden_states; max diff "
+            f"{(ref - got).abs().max().item():.3e}"
+        )
+
+    # And prove the fix matters: the RAW final-layer output (pre-norm) must
+    # NOT match -- otherwise the test could pass even with the bug present.
+    raw_final = out.hidden_states  # tuple; index num_teacher is post-norm
+    with torch.no_grad():
+        pre_norm_final = None
+
+        def _grab(_m, _i, o):
+            nonlocal pre_norm_final
+            hs = o[0] if isinstance(o, tuple) else o
+            pre_norm_final = hs[0, -PREFIX_STEPS:, :].float().cpu()
+
+        h = model.model.layers[num_teacher - 1].register_forward_hook(_grab)
+        try:
+            model.model(input_ids=ids, use_cache=False)
+        finally:
+            h.remove()
+    assert not torch.allclose(
+        raw_final[num_teacher][0, -PREFIX_STEPS:, :].float().cpu(),
+        pre_norm_final,
+        atol=1e-5,
+    ), "pre/post final-norm are identical; test cannot detect the regression"
 
 
 def test_prompts_match_paper_appendix_c():

@@ -128,8 +128,10 @@ _DEFAULT_CUDA_RUNTIME_RESERVE_GB = 2.5
 
 
 def _cuda_runtime_reserve_bytes() -> int:
-    gb = float(os.environ.get("PAW_CUDA_RUNTIME_RESERVE_GB", "")
-               or _DEFAULT_CUDA_RUNTIME_RESERVE_GB)
+    gb = float(
+        os.environ.get("PAW_CUDA_RUNTIME_RESERVE_GB", "")
+        or _DEFAULT_CUDA_RUNTIME_RESERVE_GB
+    )
     return int(gb * 1024**3)
 
 
@@ -251,6 +253,63 @@ def _free_model(model, device: str) -> None:
         torch.cuda.empty_cache()
 
 
+def _capture_prefix_hidden(
+    model, input_ids: torch.Tensor, teacher_layers: list[int]
+) -> list[torch.Tensor]:
+    """Run one forward pass and return the last PREFIX_STEPS hidden positions
+    for each layer in ``teacher_layers`` (order preserved, duplicates allowed).
+
+    This reproduces ``output_hidden_states=True`` EXACTLY -- the values the
+    mapper was trained on -- but captures only the layers/positions we need
+    via forward hooks, avoiding the large full-sequence, all-layers peak that
+    ``output_hidden_states`` materialises (important on a tight GPU). Each
+    captured slice is copied to CPU (fp32) immediately so nothing accumulates
+    in GPU memory.
+
+    Semantics, matching transformers:
+
+    * For an intermediate layer ``t``, ``hidden_states[t + 1]`` is precisely
+      that decoder layer's forward output -- exactly what the hook observes.
+    * The FINAL layer is special: transformers ties ``hidden_states[-1]`` to
+      ``last_hidden_state`` (``capture_outputs`` with
+      ``tie_last_hidden_states=True``), i.e. the value AFTER the model's final
+      RMSNorm (``Qwen3Model.forward`` runs ``hidden_states = self.norm(...)``
+      before returning). A decoder layer's raw output is the PRE-norm residual,
+      whose scale/distribution is completely different. ``depth_ratio_layers``
+      always maps the last student layer onto this final teacher layer, so
+      feeding the pre-norm value corrupts the LoRA and the interpreter
+      degenerates (it emits a single repeated token). We therefore apply
+      ``model.model.norm`` to the final layer's capture.
+    """
+    num_teacher_layers = model.config.num_hidden_layers
+    final_layer = num_teacher_layers - 1
+    final_norm = model.model.norm
+    layers = model.model.layers
+
+    wanted = set(teacher_layers)
+    captured: dict[int, torch.Tensor] = {}
+
+    def _make_hook(idx: int):
+        def _hook(_module, _inputs, output):
+            hs = output[0] if isinstance(output, tuple) else output
+            if idx == final_layer:
+                # Match hidden_states[-1] == last_hidden_state (post final norm).
+                hs = final_norm(hs)
+            captured[idx] = hs[0, -PREFIX_STEPS:, :].float().cpu()
+
+        return _hook
+
+    handles = [layers[i].register_forward_hook(_make_hook(i)) for i in wanted]
+    try:
+        with torch.no_grad():
+            model(input_ids=input_ids, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    return [captured[t] for t in teacher_layers]
+
+
 def compile_spec(
     spec: str,
     out_dir: str | Path,
@@ -330,50 +389,7 @@ def compile_spec(
     teacher_layers = depth_ratio_layers(num_teacher_layers, num_student_layers)
 
     t0 = time.perf_counter()
-    # Capture only the last PREFIX_STEPS positions of the layers we actually
-    # need, via forward hooks, instead of output_hidden_states=True (which
-    # materialises every layer's full-sequence hidden state at once -- a
-    # large, needless peak on a tight GPU). Each captured slice is moved to
-    # CPU immediately so it never accumulates in GPU memory.
-    #
-    # We must reproduce output_hidden_states EXACTLY, because the mapper was
-    # trained on those values. For an intermediate layer t, hidden_states[t+1]
-    # is precisely that decoder layer's forward output -- what the hook sees.
-    # But the FINAL layer is special: transformers ties hidden_states[-1] to
-    # last_hidden_state (capture_outputs' tie_last_hidden_states=True), i.e.
-    # the value AFTER the model's final RMSNorm (Qwen3Model.forward runs
-    # `hidden_states = self.norm(hidden_states)` before returning). The raw
-    # forward output of the last decoder layer is the PRE-norm residual, whose
-    # scale/distribution is completely different. depth_ratio_layers always
-    # maps the last student layer to this final teacher layer, so feeding the
-    # pre-norm value corrupts the LoRA and the interpreter degenerates (emits
-    # a single repeated token). So we apply model.norm to the final layer's
-    # capture, matching output_hidden_states.
-    wanted = set(teacher_layers)
-    captured = {}
-    layers = model.model.layers
-    final_layer = num_teacher_layers - 1
-    final_norm = model.model.norm
-
-    def _make_hook(idx: int):
-        def _hook(_module, _inputs, output):
-            hs = output[0] if isinstance(output, tuple) else output
-            if idx == final_layer:
-                # Match hidden_states[-1] == last_hidden_state (post final norm).
-                hs = final_norm(hs)
-            captured[idx] = hs[0, -PREFIX_STEPS:, :].float().cpu()
-
-        return _hook
-
-    handles = [layers[i].register_forward_hook(_make_hook(i)) for i in wanted]
-    try:
-        with torch.no_grad():
-            model(input_ids=input_ids, use_cache=False)
-    finally:
-        for h in handles:
-            h.remove()
-
-    prefix_hidden = [captured[t] for t in teacher_layers]
+    prefix_hidden = _capture_prefix_hidden(model, input_ids, teacher_layers)
     print(f"  prefix hidden states extracted in {time.perf_counter() - t0:.1f}s")
 
     _free_model(model, device)
