@@ -95,6 +95,34 @@ def _prefix_token_ids(tokenizer, embedding_rows: int) -> list[int]:
     return ids
 
 
+def _cuda_max_memory() -> dict[int | str, int]:
+    """Explicit `max_memory` (in raw bytes) for a single-GPU box that can't
+    necessarily fit a whole 4B model.
+
+    We *want* transformers/accelerate's auto-balancer to spill onto CPU when
+    the GPU is tight (`device_map="auto"`), but on this pinned
+    transformers/accelerate pair (5.13.0 / 1.14.0), letting them
+    *auto-detect* memory blows up: `_get_device_map` treats any string
+    `device_map` as an auto-balance request and calls
+    `get_balanced_memory -> get_max_memory`, which raises
+    `ValueError: size ... is not in a valid format` because the
+    auto-detected value it feeds into `convert_file_size_to_int` is a
+    bare digit string (no unit suffix) rather than an int or a
+    "<N><unit>" string. Passing `max_memory` ourselves (as plain ints,
+    which `convert_file_size_to_int` accepts directly) skips that broken
+    auto-detection path entirely while still getting real GPU/CPU
+    balancing out of `device_map="auto"`.
+    """
+    import psutil
+
+    free_bytes, _total_bytes = torch.cuda.mem_get_info()
+    # Mirror accelerate's own single-GPU rule of thumb: keep ~10% headroom
+    # for activations/buffers rather than packing the GPU to the brim.
+    gpu_budget = int(free_bytes * 0.9)
+    cpu_budget = int(psutil.virtual_memory().available * 0.9)
+    return {0: gpu_budget, "cpu": cpu_budget}
+
+
 def _load_model(repo: str, device: str, subfolder: str | None = None):
     """Load a causal LM with shard streaming straight to the target device.
 
@@ -107,7 +135,13 @@ def _load_model(repo: str, device: str, subfolder: str | None = None):
     bf16) can OOM during weight-materialization on 8 GiB cards because
     intermediate copies briefly push memory past the limit.
     """
-    kwargs: dict = {"dtype": torch.bfloat16}
+    kwargs: dict = {"dtype": torch.bfloat16, "device_map": device}
+    if device == "cuda":
+        # See _cuda_max_memory: request real auto-balancing (GPU can be too
+        # small for a 4B model) but hand it explicit, valid max_memory so we
+        # don't hit the accelerate auto-detection bug.
+        kwargs["device_map"] = "auto"
+        kwargs["max_memory"] = _cuda_max_memory()
     if subfolder:
         kwargs["subfolder"] = subfolder
 
