@@ -2,7 +2,8 @@
 
 A FastAPI implementation of the programasweights.com REST protocol,
 backed by the local compile pipeline in `paw_server.compile`. Point the
-official SDK at it with:
+official SDK at it (requires `pip install programasweights` separately —
+it is not a dependency of this project) with:
 
     PAW_API_URL=http://127.0.0.1:8100 python -c "
     import programasweights as paw
