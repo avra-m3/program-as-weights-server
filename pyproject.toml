@@ -1,0 +1,77 @@
+[project]
+name = "paw-re-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Avrami H", email = "git@avrami.me" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.14.0",
+    "fastapi>=0.139.0",
+    "gguf>=0.19.0",
+    "huggingface-hub[hf-xet]>=1.22.0",
+    "peft>=0.19.1",
+    "programasweights>=0.4.3",
+    "pyyaml>=6.0.3",
+    "safetensors>=0.8.0",
+    "torch>=2.12.1",
+    "transformers>=5.13.0",
+    "uvicorn>=0.50.2",
+]
+
+[project.scripts]
+paw-re-server = "paw_re_server:main"
+paw-local = "paw_local.cli:main"
+paw-server = "paw_server.cli:main"
+
+[tool.uv.build-backend]
+module-name = ["paw_re_server", "paw_local", "paw_server"]
+
+[[tool.uv.index]]
+url = "https://pypi.programasweights.com/simple/"
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # flake8-simplify
+]
+# Formatting is owned by black; keep ruff focused on linting/import-sorting.
+
+[tool.ruff.lint.per-file-ignores]
+# Prompt templates are verbatim from the PAW paper/research code; keep as-is.
+"src/paw_local/prompts.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["paw_re_server", "paw_local"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# "TestCase" is our domain model (paw_re_server.models.TestCase), not a
+# pytest test class - silence the resulting collection warning.
+filterwarnings = ["ignore:cannot collect test class 'TestCase':UserWarning"]

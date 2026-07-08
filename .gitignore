@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# uv / venv
+.venv/
+
+# PAW local cache (models/programs download here, don't commit)
+.paw_cache/
+
+# Locally compiled PAW programs (~80 MB adapters each, regenerable)
+data/programs/
+
+# Env files
+.env
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Test / coverage
+.pytest_cache/
+.ruff_cache/
+
+# Added from template
+.github/copilot-instructions.md
+
+# Server runtime data (compiled programs, not version controlled)
+data/server/
