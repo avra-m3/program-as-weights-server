@@ -19,16 +19,36 @@ Pipeline (mirrors the hosted compile, per the paper and research code):
 import datetime
 import gc
 import json
+import os
 import time
 from pathlib import Path
 
-import torch
-from huggingface_hub import hf_hub_download
-from safetensors.torch import save_file
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+# Reduce CUDA allocator fragmentation before the allocator initialises. On a
+# tight GPU (a 4B model nearly fills an 8 GiB card) the default caching
+# allocator strands memory in unusable reserved-but-free segments, which can
+# turn a would-be-fine 92 MiB attention allocation into an OOM. This env var
+# must be set before torch creates the CUDA context (i.e. before the first
+# CUDA allocation), so we set it here, ahead of `import torch`. We never
+# override an explicit operator setting.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-from paw_server.compile.mapper import depth_ratio_layers, load_mapper
-from paw_server.compile.prompts import compiler_prompt, interpreter_prompt
+import torch  # noqa: E402
+from huggingface_hub import hf_hub_download  # noqa: E402
+from safetensors.torch import save_file  # noqa: E402
+from transformers import (  # noqa: E402
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+)
+
+from paw_server.compile.mapper import (  # noqa: E402
+    depth_ratio_layers,
+    load_mapper,
+)
+from paw_server.compile.prompts import (  # noqa: E402
+    compiler_prompt,
+    interpreter_prompt,
+)
 
 COMPILER_REPO = "programasweights/paw-4b-qwen3-0.6b"
 PSEUDO_COMPILER_REPO = "Qwen/Qwen3-4B-Instruct-2507"
@@ -95,6 +115,24 @@ def _prefix_token_ids(tokenizer, embedding_rows: int) -> list[int]:
     return ids
 
 
+# Absolute GPU memory (bytes) reserved for *runtime* -- activations, the KV
+# cache, and attention/cuDNN workspace -- on top of the model weights. This
+# is deliberately a fixed floor, not a percentage: accelerate's `max_memory`
+# budgets *weights only*, and everything allocated during the forward pass
+# must fit in whatever GPU memory is left after weights. A 4B model doing
+# generation plus an output_hidden_states forward pass needs well over a
+# gigabyte of that runtime space; budgeting weights as a fraction of free
+# memory (the old bug) packs the card and leaves nothing to run in, so even
+# a 92 MiB attention allocation OOMs. Override via PAW_CUDA_RUNTIME_RESERVE_GB.
+_DEFAULT_CUDA_RUNTIME_RESERVE_GB = 2.5
+
+
+def _cuda_runtime_reserve_bytes() -> int:
+    gb = float(os.environ.get("PAW_CUDA_RUNTIME_RESERVE_GB", "")
+               or _DEFAULT_CUDA_RUNTIME_RESERVE_GB)
+    return int(gb * 1024**3)
+
+
 def _cuda_max_memory() -> dict[int | str, int]:
     """Explicit `max_memory` (in raw bytes) for a single-GPU box that can't
     necessarily fit a whole 4B model.
@@ -112,13 +150,22 @@ def _cuda_max_memory() -> dict[int | str, int]:
     which `convert_file_size_to_int` accepts directly) skips that broken
     auto-detection path entirely while still getting real GPU/CPU
     balancing out of `device_map="auto"`.
+
+    Crucially, the GPU weight budget is ``free - runtime_reserve`` (a fixed
+    absolute reserve), NOT a fraction of free memory. accelerate packs
+    weights up to this budget and spills the rest to CPU; the reserve is
+    what the forward pass actually runs in. On an ~8 GiB card this forces a
+    couple of GiB of a 4B model onto CPU -- slower, but it runs instead of
+    OOMing.
     """
     import psutil
 
     free_bytes, _total_bytes = torch.cuda.mem_get_info()
-    # Mirror accelerate's own single-GPU rule of thumb: keep ~10% headroom
-    # for activations/buffers rather than packing the GPU to the brim.
-    gpu_budget = int(free_bytes * 0.9)
+    reserve = _cuda_runtime_reserve_bytes()
+    # Leave `reserve` bytes of GPU free for runtime; never go negative. If the
+    # GPU is so small that the reserve exceeds free memory, budget 0 weights
+    # on GPU (everything offloads to CPU) rather than a negative value.
+    gpu_budget = max(free_bytes - reserve, 0)
     cpu_budget = int(psutil.virtual_memory().available * 0.9)
     return {0: gpu_budget, "cpu": cpu_budget}
 
@@ -129,11 +176,11 @@ def _load_model(repo: str, device: str, subfolder: str | None = None):
     Loading to CPU and then .to(device) doubles peak memory (~16 GB for the
     4B models) and can push a 24 GB machine deep into swap.
 
-    On CUDA we use ``device_map="auto"`` with a 1 GiB headroom so that
-    accelerate can offload layers to CPU when the model is too large for
-    the GPU.  Without the headroom the 4B pseudo compiler (~7.5 GiB in
-    bf16) can OOM during weight-materialization on 8 GiB cards because
-    intermediate copies briefly push memory past the limit.
+    On CUDA we use ``device_map="auto"`` with an explicit ``max_memory``
+    (see ``_cuda_max_memory``) that reserves a fixed runtime headroom, so
+    accelerate offloads layers to CPU when the 4B model (~7.5 GiB in bf16)
+    is too large to both fit and run on the GPU. Without that reserve the
+    weights pack the card and the forward pass OOMs on activations/KV cache.
     """
     kwargs: dict = {"dtype": torch.bfloat16, "device_map": device}
     if device == "cuda":
@@ -279,18 +326,39 @@ def compile_spec(
     full_ids = prompt_ids + pseudo_ids + [tokenizer.eos_token_id] + prefix_ids
     input_ids = torch.tensor([full_ids], device=_input_device(model, device))
 
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        fwd = model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-    hidden_states = fwd.hidden_states  # embeddings + one per compiler layer
-    num_teacher_layers = len(hidden_states) - 1
+    num_teacher_layers = model.config.num_hidden_layers
     teacher_layers = depth_ratio_layers(num_teacher_layers, num_student_layers)
-    prefix_hidden = [
-        hidden_states[t + 1][0, -PREFIX_STEPS:, :].float().cpu() for t in teacher_layers
-    ]
+
+    t0 = time.perf_counter()
+    # Capture only the last PREFIX_STEPS positions of the layers we actually
+    # need, via forward hooks, instead of output_hidden_states=True (which
+    # materialises every layer's full-sequence hidden state at once -- a
+    # large, needless peak on a tight GPU). Each captured slice is moved to
+    # CPU immediately so it never accumulates in GPU memory. Semantics match
+    # output_hidden_states: hidden_states[t + 1] is the *output* of decoder
+    # layer t, which is exactly this layer's forward output.
+    wanted = set(teacher_layers)
+    captured = {}
+    layers = model.model.layers
+
+    def _make_hook(idx: int):
+        def _hook(_module, _inputs, output):
+            hs = output[0] if isinstance(output, tuple) else output
+            captured[idx] = hs[0, -PREFIX_STEPS:, :].float().cpu()
+
+        return _hook
+
+    handles = [layers[i].register_forward_hook(_make_hook(i)) for i in wanted]
+    try:
+        with torch.no_grad():
+            model(input_ids=input_ids, use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+
+    prefix_hidden = [captured[t] for t in teacher_layers]
     print(f"  prefix hidden states extracted in {time.perf_counter() - t0:.1f}s")
 
-    del fwd, hidden_states
     _free_model(model, device)
 
     # --- 3. Map hidden states to LoRA A/B.
