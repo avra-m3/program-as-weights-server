@@ -4,7 +4,9 @@ import torch
 
 from paw_server.compile.mapper import LoraMapper, depth_ratio_layers
 from paw_server.compile.pipeline import (
+    _DEFAULT_CUDA_RUNTIME_RESERVE_GB,
     MODULE_PARENT,
+    _cuda_runtime_reserve_bytes,
     _input_device,
     interpreter_module_dims,
 )
@@ -188,6 +190,26 @@ def test_input_device_sharded_via_parent_prefix():
     # embedding leaf; the longest-prefix match must still resolve it.
     model = _FakeModel(hf_device_map={"model": 0})
     assert _input_device(model, "cuda") == torch.device("cuda", 0)
+
+
+def test_cuda_runtime_reserve_default(monkeypatch):
+    monkeypatch.delenv("PAW_CUDA_RUNTIME_RESERVE_GB", raising=False)
+    assert _cuda_runtime_reserve_bytes() == int(
+        _DEFAULT_CUDA_RUNTIME_RESERVE_GB * 1024**3
+    )
+
+
+def test_cuda_runtime_reserve_env_override(monkeypatch):
+    monkeypatch.setenv("PAW_CUDA_RUNTIME_RESERVE_GB", "3")
+    assert _cuda_runtime_reserve_bytes() == 3 * 1024**3
+
+
+def test_cuda_runtime_reserve_blank_env_falls_back_to_default(monkeypatch):
+    # An empty string must not be parsed as 0 (which would pack the GPU).
+    monkeypatch.setenv("PAW_CUDA_RUNTIME_RESERVE_GB", "")
+    assert _cuda_runtime_reserve_bytes() == int(
+        _DEFAULT_CUDA_RUNTIME_RESERVE_GB * 1024**3
+    )
 
 
 def test_prompts_match_paper_appendix_c():
