@@ -55,7 +55,7 @@ class CompileWorker:
             spec = self._specs[program_id]
             t0 = time.perf_counter()
             try:
-                from paw_local.pipeline import compile_spec
+                from paw_server.compile.pipeline import compile_spec
 
                 out_dir = self._store.program_dir(program_id)
                 compile_spec(spec, out_dir, write_gguf=True)

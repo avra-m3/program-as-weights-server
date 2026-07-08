@@ -1,7 +1,7 @@
 """Program store: on-disk artifacts + a small thread-safe registry.
 
 Layout (under the server data dir):
-    programs/<program_id>/   compile output (paw_local.compile_spec + bundle.paw)
+    programs/<program_id>/   compile output (paw_server.compile.compile_spec + bundle)
     registry.json            {programs: {id: {...}}, slugs: {slug: id}}
 """
 
