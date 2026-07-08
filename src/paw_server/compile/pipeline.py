@@ -145,15 +145,6 @@ def _load_model(repo: str, device: str, subfolder: str | None = None):
     if subfolder:
         kwargs["subfolder"] = subfolder
 
-    if device == "cuda":
-        kwargs["device_map"] = "auto"
-        total_bytes = torch.cuda.get_device_properties(0).total_memory
-        # Reserve 1 GiB for loading intermediates and KV cache.
-        max_gpu = max(int(total_bytes) - 1024 * 1024 * 1024, 0)
-        kwargs["max_memory"] = {0: str(max_gpu), "cpu": "96GiB"}
-    else:
-        kwargs["device_map"] = device
-
     model = AutoModelForCausalLM.from_pretrained(repo, **kwargs)
     return model.eval()
 
