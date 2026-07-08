@@ -27,8 +27,8 @@ from huggingface_hub import hf_hub_download
 from safetensors.torch import save_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from paw_local.mapper import depth_ratio_layers, load_mapper
-from paw_local.prompts import compiler_prompt, interpreter_prompt
+from paw_server.compile.mapper import depth_ratio_layers, load_mapper
+from paw_server.compile.prompts import compiler_prompt, interpreter_prompt
 
 COMPILER_REPO = "programasweights/paw-4b-qwen3-0.6b"
 PSEUDO_COMPILER_REPO = "Qwen/Qwen3-4B-Instruct-2507"
@@ -273,7 +273,7 @@ def compile_spec(
     )
 
     if write_gguf:
-        from paw_local.gguf_export import write_gguf_adapter
+        from paw_server.compile.gguf_export import write_gguf_adapter
 
         write_gguf_adapter(lora_params, out / "adapter.gguf", lora_alpha=lora_alpha)
 
