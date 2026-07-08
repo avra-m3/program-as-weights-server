@@ -334,16 +334,33 @@ def compile_spec(
     # need, via forward hooks, instead of output_hidden_states=True (which
     # materialises every layer's full-sequence hidden state at once -- a
     # large, needless peak on a tight GPU). Each captured slice is moved to
-    # CPU immediately so it never accumulates in GPU memory. Semantics match
-    # output_hidden_states: hidden_states[t + 1] is the *output* of decoder
-    # layer t, which is exactly this layer's forward output.
+    # CPU immediately so it never accumulates in GPU memory.
+    #
+    # We must reproduce output_hidden_states EXACTLY, because the mapper was
+    # trained on those values. For an intermediate layer t, hidden_states[t+1]
+    # is precisely that decoder layer's forward output -- what the hook sees.
+    # But the FINAL layer is special: transformers ties hidden_states[-1] to
+    # last_hidden_state (capture_outputs' tie_last_hidden_states=True), i.e.
+    # the value AFTER the model's final RMSNorm (Qwen3Model.forward runs
+    # `hidden_states = self.norm(hidden_states)` before returning). The raw
+    # forward output of the last decoder layer is the PRE-norm residual, whose
+    # scale/distribution is completely different. depth_ratio_layers always
+    # maps the last student layer to this final teacher layer, so feeding the
+    # pre-norm value corrupts the LoRA and the interpreter degenerates (emits
+    # a single repeated token). So we apply model.norm to the final layer's
+    # capture, matching output_hidden_states.
     wanted = set(teacher_layers)
     captured = {}
     layers = model.model.layers
+    final_layer = num_teacher_layers - 1
+    final_norm = model.model.norm
 
     def _make_hook(idx: int):
         def _hook(_module, _inputs, output):
             hs = output[0] if isinstance(output, tuple) else output
+            if idx == final_layer:
+                # Match hidden_states[-1] == last_hidden_state (post final norm).
+                hs = final_norm(hs)
             captured[idx] = hs[0, -PREFIX_STEPS:, :].float().cpu()
 
         return _hook
