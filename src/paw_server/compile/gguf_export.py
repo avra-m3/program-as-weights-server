@@ -26,7 +26,7 @@ def write_gguf_adapter(
     import gguf
 
     def _tensor_data(t: torch.Tensor):
-        data = t.float().numpy()
+        data = t.detach().float().cpu().numpy()
         if quant == "F32":
             return data, None
         qtype = gguf.GGMLQuantizationType[quant]

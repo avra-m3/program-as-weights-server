@@ -3,7 +3,11 @@
 import torch
 
 from paw_server.compile.mapper import LoraMapper, depth_ratio_layers
-from paw_server.compile.pipeline import MODULE_PARENT, interpreter_module_dims
+from paw_server.compile.pipeline import (
+    MODULE_PARENT,
+    _input_device,
+    interpreter_module_dims,
+)
 from paw_server.compile.prompts import compiler_prompt, interpreter_prompt
 
 QWEN3_06B_DIMS = {
@@ -130,6 +134,60 @@ def test_gguf_adapter_roundtrip(tmp_path):
     assert list(tensors["blk.0.attn_q.weight.lora_a"].shape) == [1024, 64]
     assert list(tensors["blk.1.ffn_down.weight.lora_b"].shape) == [64, 1024]
     assert all(t.tensor_type.name == "Q4_0" for t in tensors.values())
+
+
+class _FakeModel:
+    """Minimal stand-in exposing the attributes _input_device inspects."""
+
+    def __init__(self, hf_device_map=None, param_device="cpu"):
+        self._emb = torch.nn.Embedding(4, 4)
+        self._param_device = torch.device(param_device)
+        if hf_device_map is not None:
+            self.hf_device_map = hf_device_map
+
+    def get_input_embeddings(self):
+        return self._emb
+
+    def named_modules(self):
+        # The embedding lives at "model.embed_tokens", matching a real
+        # Qwen3 causal LM's module tree.
+        yield "", self
+        yield "model", torch.nn.Module()
+        yield "model.embed_tokens", self._emb
+
+    def parameters(self):
+        p = torch.nn.Parameter(torch.zeros(1, device=self._param_device))
+        yield p
+
+
+def test_input_device_no_sharding_uses_param_device():
+    # No hf_device_map => single-device load; follow the model's params.
+    model = _FakeModel(hf_device_map=None, param_device="cpu")
+    assert _input_device(model, "cuda") == torch.device("cpu")
+
+
+def test_input_device_sharded_embedding_on_gpu():
+    # device_map="auto" placement with the embedding on GPU 0.
+    model = _FakeModel(
+        hf_device_map={"model.embed_tokens": 0, "model.layers.20": "cpu"}
+    )
+    assert _input_device(model, "cuda") == torch.device("cuda", 0)
+
+
+def test_input_device_sharded_embedding_offloaded_to_cpu():
+    # The edge case the fix targets: a tight GPU pushes the embedding to CPU,
+    # so inputs must be on CPU (hardcoding "cuda" would device-mismatch).
+    model = _FakeModel(
+        hf_device_map={"model.embed_tokens": "cpu", "model.layers.0": 0}
+    )
+    assert _input_device(model, "cuda") == torch.device("cpu")
+
+
+def test_input_device_sharded_via_parent_prefix():
+    # accelerate may key the map by a parent module ("model") rather than the
+    # embedding leaf; the longest-prefix match must still resolve it.
+    model = _FakeModel(hf_device_map={"model": 0})
+    assert _input_device(model, "cuda") == torch.device("cuda", 0)
 
 
 def test_prompts_match_paper_appendix_c():
