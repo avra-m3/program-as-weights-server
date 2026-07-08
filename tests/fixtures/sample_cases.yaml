@@ -1,0 +1,6 @@
+- name: happy path
+  input: "I love this!"
+  expected: "positive"
+
+- input: "This is terrible."
+  expected: "negative"
