@@ -1,11 +1,11 @@
 # How PAW compilation works (and what it takes to scale it up)
 
-This documents the *exact* mechanism implemented in `src/paw_local/`,
-reverse-validated against the paper (arXiv:2607.02512), the authors'
-research code (anonymous.4open.science/r/programasweights), the published
-weights (HF `programasweights/paw-4b-qwen3-0.6b`), and a production
-program artifact (HF `programasweights/paw-programs`). See `plan.md` §7
-for the verification trail.
+This documents the *exact* mechanism implemented in
+`src/paw_server/compile/`, reverse-validated against the paper
+(arXiv:2607.02512), the authors' research code
+(anonymous.4open.science/r/programasweights), the published weights (HF
+`programasweights/paw-4b-qwen3-0.6b`), and a production program artifact
+(HF `programasweights/paw-programs`).
 
 ## 1. The cast of models
 
@@ -31,7 +31,7 @@ generation is done by the untrained `C_p`.
 ### Step 1 — pseudo-program generation (untrained `C_p`)
 
 The spec is wrapped in the "examples" prompt (verbatim in
-`paw_local/prompts.py`, from the paper's Appendix C): *"You are
+`paw_server/compile/prompts.py`, from the paper's Appendix C): *"You are
 PAW-Compiler … write a PSEUDO-PROGRAM … Task: + 3-6 example input/output
 pairs … under 250 tokens."* This is rendered with Qwen's chat template
 (`add_generation_prompt=True, enable_thinking=False`) and decoded
