@@ -1,7 +1,7 @@
 [project]
-name = "paw-re-server"
+name = "paw-server"
 version = "0.1.0"
-description = "Add your description here"
+description = "Self-hosted FastAPI server implementing the programasweights.com compile protocol, backed by a local PAW compile pipeline."
 readme = "README.md"
 authors = [
     { name = "Avrami H", email = "git@avrami.me" }
@@ -14,7 +14,6 @@ dependencies = [
     "huggingface-hub[hf-xet]>=1.22.0",
     "peft>=0.19.1",
     "programasweights>=0.4.3",
-    "pyyaml>=6.0.3",
     "safetensors>=0.8.0",
     "torch>=2.12.1",
     "transformers>=5.13.0",
@@ -70,6 +69,3 @@ target-version = ["py312"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# "TestCase" is our domain model (paw_re_server.models.TestCase), not a
-# pytest test class - silence the resulting collection warning.
-filterwarnings = ["ignore:cannot collect test class 'TestCase':UserWarning"]
