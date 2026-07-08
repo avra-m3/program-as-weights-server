@@ -9,5 +9,4 @@ __pycache__/
 data/programs/
 .paw_cache/
 .env
-specs/
 tests/
