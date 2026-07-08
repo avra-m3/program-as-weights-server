@@ -149,6 +149,52 @@ def _load_model(repo: str, device: str, subfolder: str | None = None):
     return model.eval()
 
 
+def _input_device(model, device: str) -> torch.device:
+    """The device that top-level inputs (input_ids) must live on.
+
+    With ``device_map="auto"`` accelerate shards the model across GPU and
+    CPU and installs hooks that move each submodule's inputs to that
+    submodule's device -- but only *after* the top-level tensor reaches the
+    first module. So ``input_ids`` must start on the device of the module
+    that first consumes them (the input embedding). That is almost always
+    GPU 0, but if ``max_memory[0]`` is tight accelerate can place the
+    embedding on CPU, in which case hardcoding ``"cuda"`` would raise a
+    device-mismatch. Derive it from the actual placement instead.
+    """
+    hf_map = getattr(model, "hf_device_map", None)
+    if hf_map:
+        # Find where the input-embedding module was placed. Prefer looking it
+        # up by the embedding's own module name rather than trusting dict
+        # order; fall back to the first entry (accelerate lists modules in
+        # traversal order, so the embedding is normally first anyway).
+        emb = model.get_input_embeddings()
+        emb_key = next(
+            (name for name, mod in model.named_modules() if mod is emb), None
+        )
+        placed = None
+        if emb_key is not None:
+            # hf_device_map keys are module prefixes ("model.embed_tokens" or
+            # a parent like "model"); match the longest prefix of emb_key.
+            for key in sorted(hf_map, key=len, reverse=True):
+                if emb_key == key or emb_key.startswith(key + "."):
+                    placed = hf_map[key]
+                    break
+        if placed is None:
+            placed = next(iter(hf_map.values()))
+        # accelerate normalises device values to ints (GPU index), "cpu",
+        # or "disk".
+        if isinstance(placed, int):
+            return torch.device("cuda", placed)
+        if placed in ("cpu", "disk"):
+            return torch.device("cpu")
+        return torch.device(placed)
+    # No sharding (single-device load): inputs go on the model's device.
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device(device)
+
+
 def _free_model(model, device: str) -> None:
     del model
     gc.collect()
@@ -195,7 +241,9 @@ def compile_spec(
     print(f"  loaded in {time.perf_counter() - t0:.1f}s")
 
     gen_prompt = _render_chat(ps_tokenizer, compiler_prompt(spec, style=pseudo_style))
-    gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(device)
+    gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(
+        _input_device(ps_model, device)
+    )
     t0 = time.perf_counter()
     with torch.no_grad():
         gen_out = ps_model.generate(
@@ -229,7 +277,7 @@ def compile_spec(
     prompt_ids = tokenizer(hidden_prompt)["input_ids"]
     pseudo_ids = tokenizer(pseudo_program, add_special_tokens=False)["input_ids"]
     full_ids = prompt_ids + pseudo_ids + [tokenizer.eos_token_id] + prefix_ids
-    input_ids = torch.tensor([full_ids], device=device)
+    input_ids = torch.tensor([full_ids], device=_input_device(model, device))
 
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -262,8 +310,12 @@ def compile_spec(
     tensors = {}
     for (layer, module), (a, b) in lora_params.items():
         base = f"base_model.model.model.layers.{layer}.{MODULE_PARENT[module]}.{module}"
-        tensors[f"{base}.lora_A.weight"] = a.to(torch.bfloat16).contiguous()
-        tensors[f"{base}.lora_B.weight"] = b.to(torch.bfloat16).contiguous()
+        tensors[f"{base}.lora_A.weight"] = (
+            a.detach().to("cpu", torch.bfloat16).contiguous()
+        )
+        tensors[f"{base}.lora_B.weight"] = (
+            b.detach().to("cpu", torch.bfloat16).contiguous()
+        )
     save_file(tensors, str(out / "adapter_model.safetensors"))
 
     adapter_config = {
