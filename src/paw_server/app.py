@@ -60,7 +60,7 @@ class CompileRequest(BaseModel):
     compiler: str | None = None
     name: str | None = None
     tags: list[str] | None = None
-    public: bool = True
+    public: bool = False
     slug: str | None = None
     ephemeral: bool = False
 
@@ -227,19 +227,6 @@ def create_app(data_dir: str | Path) -> FastAPI:
         meta_path = store.program_dir(program_id) / "meta.json"
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
         return {**meta, **_program_response(entry)}
-
-    @app.get("/api/v1/programs")
-    def list_programs(
-        mine: bool = False, sort: str = "recent", per_page: int = 20, page: int = 1
-    ) -> dict:
-        programs = [_program_response(e) for e in store.list_programs()]
-        start = (page - 1) * per_page
-        return {
-            "programs": programs[start : start + per_page],
-            "total": len(programs),
-            "page": page,
-            "per_page": per_page,
-        }
 
     @app.get("/api/v1/models/runtimes/{runtime_id}")
     def get_runtime(runtime_id: str) -> dict:

@@ -107,12 +107,15 @@ def test_runtime_manifest_matches_sdk_expectations(client):
     assert m["local_sdk"]["base_model"]["file"] == "qwen3-0.6b-q6_k.gguf"
 
 
-def test_program_meta_and_listing(client):
+def test_program_meta(client):
     pid = client.post("/api/v1/compile", json={"spec": "s3"}).json()["program_id"]
     meta = client.get(f"/api/v1/programs/{pid}").json()
     assert meta["interpreter"] == "Qwen/Qwen3-0.6B"
-    listing = client.get("/api/v1/programs", params={"mine": "true"}).json()
-    assert any(p["program_id"] == pid for p in listing["programs"])
+
+
+def test_list_programs_endpoint_removed(client):
+    r = client.get("/api/v1/programs")
+    assert r.status_code == 404
 
 
 def test_compile_instructions_returns_static_prompt(client):

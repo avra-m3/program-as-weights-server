@@ -132,7 +132,6 @@ print(fn('I love this'))
 - `GET /api/v1/programs/{id}/download` — download the `.paw` bundle
 - `GET /api/v1/programs/resolve/{slug}` — resolve a slug to a program id
 - `GET /api/v1/programs/{id}` — program metadata
-- `GET /api/v1/programs` — list programs (paginated)
 - `GET /api/v1/programs/{slug}/versions` — version history for a slug
 - `GET /api/v1/models/runtimes/{runtime_id}` — runtime manifest (which GGUF
   interpreter to fetch)

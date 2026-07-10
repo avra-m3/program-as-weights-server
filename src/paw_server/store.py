@@ -99,10 +99,6 @@ class ProgramStore:
         with self._lock:
             return self._registry["slugs"].get(slug)
 
-    def list_programs(self) -> list[dict]:
-        with self._lock:
-            return [dict(e) for e in self._registry["programs"].values()]
-
     def bundle_path(self, program_id: str) -> Path:
         """Build (once) and return the .paw bundle: a ZIP of the artifacts."""
         pdir = self.program_dir(program_id)
