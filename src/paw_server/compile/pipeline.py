@@ -317,11 +317,21 @@ def compile_spec(
     max_new_tokens: int = 512,
     device: str | None = None,
     write_gguf: bool = False,
+    pseudo_program: str | None = None,
 ) -> Path:
-    """Compile `spec` into a PAW program directory. Returns the directory."""
+    """Compile `spec` into a PAW program directory. Returns the directory.
+
+    If `pseudo_program` is given, step 1 below (running the untrained
+    pseudo compiler to *generate* a pseudo-program) is skipped entirely
+    and the supplied text is used as-is for step 2 onward. This backs
+    POST /api/v1/compile/raw, letting a caller substitute their own
+    pseudo-program for whatever the untrained Qwen3-4B pseudo compiler
+    would otherwise have written.
+    """
     device = device or pick_device()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    pseudo_program_provided = pseudo_program is not None
 
     meta_path = hf_hub_download(COMPILER_REPO, "meta.json")
     meta = json.loads(Path(meta_path).read_text())
@@ -335,36 +345,46 @@ def compile_spec(
     module_dims = interpreter_module_dims(int_config)
     num_student_layers = int_config.num_hidden_layers
 
-    # --- 1. Generate the pseudo-program with the *untrained* pseudo compiler
-    # (paper §3.1: "an off-the-shelf Qwen3-4B-Instruct-2507 model that we
-    # never train"). The trained compiler checkpoint cannot generate — its
-    # LM ability collapsed during training; it only encodes (verified: its
-    # greedy output degenerates on any prompt, on every device/dtype).
-    print(f"Loading pseudo compiler ({PSEUDO_COMPILER_REPO}) on {device} ...")
-    t0 = time.perf_counter()
-    ps_tokenizer = AutoTokenizer.from_pretrained(PSEUDO_COMPILER_REPO)
-    ps_model = _load_model(PSEUDO_COMPILER_REPO, device)
-    print(f"  loaded in {time.perf_counter() - t0:.1f}s")
+    if pseudo_program_provided:
+        # --- 1 (skipped). Caller supplied the pseudo-program directly.
+        pseudo_program = pseudo_program.strip()
+        print("Using caller-supplied pseudo-program; skipping pseudo compiler.")
+    else:
+        # --- 1. Generate the pseudo-program with the *untrained* pseudo
+        # compiler (paper §3.1: "an off-the-shelf Qwen3-4B-Instruct-2507
+        # model that we never train"). The trained compiler checkpoint
+        # cannot generate — its LM ability collapsed during training; it
+        # only encodes (verified: its greedy output degenerates on any
+        # prompt, on every device/dtype).
+        print(f"Loading pseudo compiler ({PSEUDO_COMPILER_REPO}) on {device} ...")
+        t0 = time.perf_counter()
+        ps_tokenizer = AutoTokenizer.from_pretrained(PSEUDO_COMPILER_REPO)
+        ps_model = _load_model(PSEUDO_COMPILER_REPO, device)
+        print(f"  loaded in {time.perf_counter() - t0:.1f}s")
 
-    gen_prompt = _render_chat(ps_tokenizer, compiler_prompt(spec, style=pseudo_style))
-    gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(
-        _input_device(ps_model, device)
-    )
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        gen_out = ps_model.generate(
-            **gen_inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=ps_tokenizer.pad_token_id or ps_tokenizer.eos_token_id,
+        gen_prompt = _render_chat(
+            ps_tokenizer, compiler_prompt(spec, style=pseudo_style)
         )
-    new_tokens = gen_out[0, gen_inputs["input_ids"].shape[1] :]
-    pseudo_program = ps_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-    print(
-        f"  pseudo-program: {len(new_tokens)} tokens "
-        f"in {time.perf_counter() - t0:.1f}s"
-    )
-    _free_model(ps_model, device)
+        gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(
+            _input_device(ps_model, device)
+        )
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            gen_out = ps_model.generate(
+                **gen_inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=ps_tokenizer.pad_token_id or ps_tokenizer.eos_token_id,
+            )
+        new_tokens = gen_out[0, gen_inputs["input_ids"].shape[1] :]
+        pseudo_program = ps_tokenizer.decode(
+            new_tokens, skip_special_tokens=True
+        ).strip()
+        print(
+            f"  pseudo-program: {len(new_tokens)} tokens "
+            f"in {time.perf_counter() - t0:.1f}s"
+        )
+        _free_model(ps_model, device)
 
     # --- 2. Prefix-hidden forward pass through the *trained* compiler.
     # Sequence: [chat(minimal(spec))] [pseudo] [EOS] [prefix tokens]; the
@@ -454,6 +474,9 @@ def compile_spec(
                 "spec": spec,
                 "compiler_snapshot": "paw-4b-qwen3-0.6b-20260407",
                 "compiler_fingerprint": "local-reimplementation",
+                "pseudo_program_strategy": (
+                    "provided" if pseudo_program_provided else "examples"
+                ),
                 "interpreter": interpreter_id,
                 "lora_rank": lora_rank,
                 "lora_alpha": lora_alpha,

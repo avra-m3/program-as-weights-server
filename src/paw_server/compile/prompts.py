@@ -57,6 +57,17 @@ INTERPRETER_MINIMAL = """{pseudo_program}
 [END_INPUT]"""
 
 
+def compiler_instructions() -> str:
+    """The static "examples"-style instructions, spec placeholder unfilled.
+
+    This is verbatim what the untrained pseudo compiler (Qwen3-4B-
+    Instruct-2507) is normally told to do when writing a pseudo-program --
+    i.e. the text GET /api/v1/compile/instructions exposes so a caller can
+    see exactly what they'd be replacing by using POST /api/v1/compile/raw.
+    """
+    return COMPILER_EXAMPLES
+
+
 def compiler_prompt(spec: str, style: str = "minimal") -> str:
     if style == "minimal":
         return COMPILER_MINIMAL.format(spec=spec).strip()
