@@ -119,6 +119,16 @@ print(fn('I love this'))
 - `POST /api/v1/compile` — compile a spec (blocks up to 100 s; the SDK's
   download polling via `202 Accepted` takes over if compile is still
   running past that)
+- `POST /api/v1/compile/raw` — like `/api/v1/compile`, but you supply the
+  `pseudo_program` yourself instead of having the untrained Qwen3-4B pseudo
+  compiler generate one. Same request/response shape plus a required
+  `pseudo_program` field; skips straight to the trained-compiler encoding
+  step.
+- `GET /api/v1/compile/instructions` — the static "system prompt"
+  normally given to the untrained pseudo compiler when it writes a
+  pseudo-program (see `paw_server/compile/prompts.py`'s `COMPILER_EXAMPLES`)
+- `GET /api/v1/programs/{id}/pseudo_program` — fetch the pseudo-program
+  text for an already-compiled program
 - `GET /api/v1/programs/{id}/download` — download the `.paw` bundle
 - `GET /api/v1/programs/resolve/{slug}` — resolve a slug to a program id
 - `GET /api/v1/programs/{id}` — program metadata

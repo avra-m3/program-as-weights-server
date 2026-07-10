@@ -23,12 +23,20 @@ class CompileWorker:
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._events: dict[str, threading.Event] = {}
         self._specs: dict[str, str] = {}
+        self._pseudo_programs: dict[str, str | None] = {}
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def submit(self, program_id: str, spec: str) -> threading.Event:
-        """Queue a compile (idempotent); returns the completion event."""
+    def submit(
+        self, program_id: str, spec: str, pseudo_program: str | None = None
+    ) -> threading.Event:
+        """Queue a compile (idempotent); returns the completion event.
+
+        If ``pseudo_program`` is given, the compile pipeline skips running
+        the untrained pseudo compiler and uses this text directly (backs
+        POST /api/v1/compile/raw).
+        """
         with self._lock:
             event = self._events.get(program_id)
             if event is not None and event.is_set():
@@ -39,6 +47,7 @@ class CompileWorker:
                 event = threading.Event()
                 self._events[program_id] = event
                 self._specs[program_id] = spec
+                self._pseudo_programs[program_id] = pseudo_program
                 self._store.upsert(program_id, spec=spec, status="compiling")
                 self._queue.put(program_id)
         return event
@@ -53,18 +62,24 @@ class CompileWorker:
             if program_id is None:
                 return
             spec = self._specs[program_id]
+            pseudo_program = self._pseudo_programs.get(program_id)
             t0 = time.perf_counter()
             try:
                 from paw_server.compile.pipeline import compile_spec
 
                 out_dir = self._store.program_dir(program_id)
-                compile_spec(spec, out_dir, write_gguf=True)
+                compile_spec(
+                    spec, out_dir, write_gguf=True, pseudo_program=pseudo_program
+                )
                 self._store.bundle_path(program_id)  # pre-build the ZIP
                 self._store.upsert(
                     program_id,
                     status="compiled",
                     timings={"total_s": round(time.perf_counter() - t0, 1)},
                     error=None,
+                    pseudo_program_strategy=(
+                        "provided" if pseudo_program else "examples"
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - job boundary
                 traceback.print_exc()
@@ -74,3 +89,4 @@ class CompileWorker:
                     self._events[program_id].set()
                     # Leave the event for late waiters; drop the spec.
                     self._specs.pop(program_id, None)
+                    self._pseudo_programs.pop(program_id, None)
