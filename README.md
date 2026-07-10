@@ -1,14 +1,46 @@
-# paw-server
+# program-as-weights-server
 
 A self-hosted [FastAPI](https://fastapi.tiangolo.com/) server that implements
 the [programasweights.com](https://programasweights.com) REST compile
-protocol, backed by a fully-local PAW compile pipeline — no hosted API is
-needed to compile programs. The **unmodified official PAW SDK**
-([`programasweights`](https://github.com/programasweights/programasweights-python))
+protocol, backed by a fully-local Program-as-Weights (PAW) compile pipeline —
+no hosted API is needed to compile programs. The **unmodified official PAW
+SDK** ([`programasweights`](https://github.com/programasweights/programasweights-python))
 works against it unchanged, just by pointing `PAW_API_URL` at this server.
 
 For the mechanism (what compile actually does, and the wire contract this
 server implements) see [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+
+> [!IMPORTANT]
+> **This is an independent, unofficial reimplementation.** It is not
+> affiliated with, endorsed by, or supported by the authors of the
+> Program-as-Weights paper or the operators of programasweights.com. It was
+> built by reverse-engineering the published paper, the authors' research
+> code, the released model weights, and the official SDK's wire protocol (all
+> credited below). It downloads the authors' publicly *available* weights from
+> Hugging Face at runtime — it does not bundle or redistribute them, and note
+> those weights currently ship with no explicit license (see
+> [License](#license)). Any bugs or inaccuracies are this project's own, not
+> the original authors'.
+
+## Credits
+
+This project is a serving/reimplementation layer on top of the research
+described in:
+
+> **Program-as-Weights: A Programming Paradigm for Fuzzy Functions.**
+> Wentao Zhang, Liliana Hotsko, Woojeong Kim, Pengyu Nie, Stuart Shieber,
+> Yuntian Deng. arXiv:2607.02512, 2026.
+> <https://arxiv.org/abs/2607.02512>
+
+All of the core ideas — the pseudo-program/LoRA-adapter program
+representation, the compiler→mapper→interpreter pipeline, the FuzzyBench
+dataset, and the released models — are the work of those authors. Please cite
+their paper (see [Citation](#citation)) if you use this project or build on
+it. The paper is released under
+[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/).
+
+The prompt templates in `src/paw_server/compile/prompts.py` are reproduced
+verbatim from the paper's appendix and the authors' research code.
 
 ## Requirements
 
@@ -23,6 +55,8 @@ server implements) see [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 ## Setup
 
 ```bash
+git clone git@github.com:avra-m3/program-as-weights-server.git
+cd program-as-weights-server
 uv sync
 ```
 
@@ -151,3 +185,57 @@ uv run pytest            # run the test suite
 
 `ruff` handles linting + import sorting; `black` owns formatting (ruff's
 formatter is disabled in favor of black, per project convention).
+
+## License
+
+This server implementation is released under the [MIT License](LICENSE),
+© 2026 Avrami H.
+
+The MIT license covers **only the code in this repository** (with the one
+exception noted below). It does *not* cover the Program-as-Weights paper, the
+model weights, the FuzzyBench dataset, or the official `programasweights` SDK —
+those are the property of their respective authors. See [Credits](#credits).
+
+### Third-party artifacts this server downloads at runtime
+
+This server does **not** bundle or redistribute any model weights or datasets —
+it fetches them from Hugging Face on first use, onto the running machine. Each
+artifact's license applies as defined in its own repository, and complying with
+those terms is the user's responsibility:
+
+- [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) — pseudo compiler base
+- [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) — interpreter base
+- [`programasweights/paw-4b-qwen3-0.6b`](https://huggingface.co/programasweights/paw-4b-qwen3-0.6b) — trained compiler + mapper
+- [`programasweights/paw-programs`](https://huggingface.co/programasweights/paw-programs) — published program artifacts
+- [`programasweights/Qwen3-0.6B-GGUF-Q6_K`](https://huggingface.co/programasweights/Qwen3-0.6B-GGUF-Q6_K) — runtime interpreter (GGUF)
+- [`wtzhang-nlp/fuzzy_bench`](https://huggingface.co/datasets/wtzhang-nlp/fuzzy_bench) — FuzzyBench dataset (training/eval only)
+
+> [!WARNING]
+> Some of the `programasweights/*` artifacts do not declare an explicit license
+> at their source. Absent an explicit grant, default copyright applies and reuse
+> rights may be unclear. If you intend to use this server for anything beyond
+> personal experimentation, check each repository and confirm the terms with the
+> original authors first.
+
+### Third-party content in this repository
+
+The prompt templates in `src/paw_server/compile/prompts.py` are reproduced
+verbatim from the Program-as-Weights paper and the authors' research code. That
+text is © its original authors and licensed under
+[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/); it is included here
+with attribution and is **not** covered by this repository's MIT license.
+
+## Citation
+
+If you use this project, please cite the original paper:
+
+```bibtex
+@article{zhang2026paw,
+  title   = {Program-as-Weights: A Programming Paradigm for Fuzzy Functions},
+  author  = {Zhang, Wentao and Hotsko, Liliana and Kim, Woojeong and
+             Nie, Pengyu and Shieber, Stuart and Deng, Yuntian},
+  journal = {arXiv preprint arXiv:2607.02512},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2607.02512}
+}
+```

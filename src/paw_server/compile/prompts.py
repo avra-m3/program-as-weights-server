@@ -1,5 +1,11 @@
 """Prompt templates, verbatim from the PAW research code (Appendix C).
 
+Attribution: the prompt text in this module is reproduced verbatim from the
+Program-as-Weights paper (arXiv:2607.02512) and the authors' research code.
+It is (c) its original authors and licensed under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/), included here with attribution.
+This text is NOT covered by this repository's MIT license.
+
 Two compiler styles exist:
 - "examples" is the template used with the *off-the-shelf*
   Qwen3-4B-Instruct-2507 pseudo compiler to generate pseudo-programs
