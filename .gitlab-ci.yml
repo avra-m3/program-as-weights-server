@@ -4,8 +4,12 @@ stages:
 deploy:
   stage: deploy
   rules:
-    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+    # Only runs where DOWNSTREAM_PROJECT is configured as a CI/CD variable
+    # (e.g. set to "example-org/downstream-project" on a self-hosted GitLab instance).
+    # Instances that don't define it - such as the primary GitLab instance - will
+    # simply skip this job.
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push" && $DOWNSTREAM_PROJECT
   trigger:
-    project: example-org/downstream-project
+    project: $DOWNSTREAM_PROJECT
     branch: main
     strategy: depend
