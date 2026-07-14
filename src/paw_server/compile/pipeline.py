@@ -45,16 +45,22 @@ from paw_server.compile.mapper import (  # noqa: E402
     depth_ratio_layers,
     load_mapper,
 )
+from paw_server.compile.profiles import (  # noqa: E402
+    DEFAULT_COMPILER,
+    get_profile,
+    qwen3_module_dims,
+)
 from paw_server.compile.prompts import (  # noqa: E402
     compiler_prompt,
     interpreter_prompt,
 )
 
-COMPILER_REPO = "programasweights/paw-4b-qwen3-0.6b"
 PSEUDO_COMPILER_REPO = "Qwen/Qwen3-4B-Instruct-2507"
 PREFIX_STEPS = 64
 
-# PEFT module name -> submodule path inside a Qwen3 decoder layer.
+# PEFT module name -> submodule path inside a Qwen3 decoder layer. Retained for
+# the default (Qwen3) compiler and referenced by tests; per-compiler PEFT paths
+# now live in paw_server.compile.profiles.
 MODULE_PARENT = {
     "q_proj": "self_attn",
     "k_proj": "self_attn",
@@ -65,6 +71,10 @@ MODULE_PARENT = {
     "down_proj": "mlp",
 }
 
+# Kept as a module-level alias for backwards compatibility (tests and callers
+# that want the Qwen3 interpreter's LoRA dims without going through a profile).
+interpreter_module_dims = qwen3_module_dims
+
 
 def pick_device() -> str:
     if torch.backends.mps.is_available():
@@ -72,24 +82,6 @@ def pick_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
-
-
-def interpreter_module_dims(config) -> dict[str, tuple[int, int]]:
-    """(d_in, d_out) of each LoRA target module, from the interpreter config."""
-    hidden = config.hidden_size
-    head_dim = getattr(config, "head_dim", hidden // config.num_attention_heads)
-    q_out = config.num_attention_heads * head_dim
-    kv_out = config.num_key_value_heads * head_dim
-    inter = config.intermediate_size
-    return {
-        "q_proj": (hidden, q_out),
-        "k_proj": (hidden, kv_out),
-        "v_proj": (hidden, kv_out),
-        "o_proj": (q_out, hidden),
-        "gate_proj": (hidden, inter),
-        "up_proj": (hidden, inter),
-        "down_proj": (inter, hidden),
-    }
 
 
 def _render_chat(tokenizer, prompt: str) -> str:
@@ -318,6 +310,7 @@ def compile_spec(
     device: str | None = None,
     write_gguf: bool = False,
     pseudo_program: str | None = None,
+    compiler: str = DEFAULT_COMPILER,
 ) -> Path:
     """Compile `spec` into a PAW program directory. Returns the directory.
 
@@ -327,13 +320,20 @@ def compile_spec(
     POST /api/v1/compile/raw, letting a caller substitute their own
     pseudo-program for whatever the untrained Qwen3-4B pseudo compiler
     would otherwise have written.
+
+    `compiler` selects the published compiler / interpreter pair (see
+    paw_server.compile.profiles): the default targets Qwen3-0.6B, and
+    "paw-4b-gpt2" targets a 124M GPT-2. Both use the same untrained
+    Qwen3-4B pseudo compiler and the same trained-compiler architecture;
+    they differ in interpreter dims, tensor naming and templating.
     """
+    profile = get_profile(compiler)
     device = device or pick_device()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     pseudo_program_provided = pseudo_program is not None
 
-    meta_path = hf_hub_download(COMPILER_REPO, "meta.json")
+    meta_path = hf_hub_download(profile.repo, "meta.json")
     meta = json.loads(Path(meta_path).read_text())
     interpreter_id = meta["interpreter_model"]
     lora_rank = meta["lora_rank"]
@@ -342,7 +342,7 @@ def compile_spec(
     assert meta["prefix_steps"] == PREFIX_STEPS
 
     int_config = AutoConfig.from_pretrained(interpreter_id)
-    module_dims = interpreter_module_dims(int_config)
+    module_dims = profile.module_dims(int_config)
     num_student_layers = int_config.num_hidden_layers
 
     if pseudo_program_provided:
@@ -390,10 +390,10 @@ def compile_spec(
     # Sequence: [chat(minimal(spec))] [pseudo] [EOS] [prefix tokens]; the
     # "minimal" prompt is always used here regardless of pseudo_style,
     # matching training (meta.json compiler_prompt_style="minimal").
-    print(f"Loading trained compiler ({COMPILER_REPO}) on {device} ...")
+    print(f"Loading trained compiler ({profile.repo}) on {device} ...")
     t0 = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(COMPILER_REPO, subfolder="compiler")
-    model = _load_model(COMPILER_REPO, device, subfolder="compiler")
+    tokenizer = AutoTokenizer.from_pretrained(profile.repo, subfolder="compiler")
+    model = _load_model(profile.repo, device, subfolder="compiler")
     print(f"  loaded in {time.perf_counter() - t0:.1f}s")
 
     embedding_rows = model.get_input_embeddings().weight.shape[0]
@@ -415,7 +415,7 @@ def compile_spec(
     _free_model(model, device)
 
     # --- 3. Map hidden states to LoRA A/B.
-    mapper_path = hf_hub_download(COMPILER_REPO, "lora_mapper.pt")
+    mapper_path = hf_hub_download(profile.repo, "lora_mapper.pt")
     mapper = load_mapper(
         mapper_path,
         teacher_hidden_size=prefix_hidden[0].shape[-1],
@@ -430,7 +430,7 @@ def compile_spec(
     # --- 4. Export: PEFT adapter + runtime artifact files.
     tensors = {}
     for (layer, module), (a, b) in lora_params.items():
-        base = f"base_model.model.model.layers.{layer}.{MODULE_PARENT[module]}.{module}"
+        base = profile.peft_key(layer, module)
         tensors[f"{base}.lora_A.weight"] = (
             a.detach().to("cpu", torch.bfloat16).contiguous()
         )
@@ -452,18 +452,18 @@ def compile_spec(
 
     (out / "pseudo_program.txt").write_text(pseudo_program + "\n")
 
-    int_tokenizer = AutoTokenizer.from_pretrained(interpreter_id)
-    template = int_tokenizer.apply_chat_template(
-        [
-            {
-                "role": "user",
-                "content": interpreter_prompt(pseudo_program, "{INPUT_PLACEHOLDER}"),
-            }
-        ],
-        add_generation_prompt=True,
-        tokenize=False,
-        enable_thinking=False,
-    )
+    # Qwen3 programs wrap the interpreter prompt in the tokenizer chat
+    # template; GPT-2 has no chat template and consumes the prompt as-is
+    # (matches official paw-programs artifacts for both runtimes).
+    template = interpreter_prompt(pseudo_program, "{INPUT_PLACEHOLDER}")
+    if profile.chat_template:
+        int_tokenizer = AutoTokenizer.from_pretrained(interpreter_id)
+        template = int_tokenizer.apply_chat_template(
+            [{"role": "user", "content": template}],
+            add_generation_prompt=True,
+            tokenize=False,
+            enable_thinking=False,
+        )
     (out / "prompt_template.txt").write_text(template)
 
     (out / "meta.json").write_text(
@@ -472,7 +472,7 @@ def compile_spec(
                 "version": 3,
                 "program_id": out.name,
                 "spec": spec,
-                "compiler_snapshot": "paw-4b-qwen3-0.6b-20260407",
+                "compiler_snapshot": profile.snapshot,
                 "compiler_fingerprint": "local-reimplementation",
                 "pseudo_program_strategy": (
                     "provided" if pseudo_program_provided else "examples"
@@ -480,7 +480,7 @@ def compile_spec(
                 "interpreter": interpreter_id,
                 "lora_rank": lora_rank,
                 "lora_alpha": lora_alpha,
-                "prefix_steps": None,
+                "prefix_steps": profile.meta_prefix_steps,
                 "created_at": datetime.datetime.now(datetime.UTC).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
@@ -492,7 +492,12 @@ def compile_spec(
     if write_gguf:
         from paw_server.compile.gguf_export import write_gguf_adapter
 
-        write_gguf_adapter(lora_params, out / "adapter.gguf", lora_alpha=lora_alpha)
+        write_gguf_adapter(
+            lora_params,
+            out / "adapter.gguf",
+            lora_alpha=lora_alpha,
+            arch=profile.gguf_arch,
+        )
 
     print(f"Compiled program written to {out}")
     return out

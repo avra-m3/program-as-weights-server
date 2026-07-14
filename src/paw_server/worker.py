@@ -11,8 +11,12 @@ import threading
 import time
 import traceback
 
+from paw_server.compile.profiles import DEFAULT_COMPILER
 from paw_server.store import ProgramStore
 
+# Default (Qwen3) compiler snapshot / runtime, kept for callers and tests that
+# reference the module-level constants; per-compiler values live in
+# paw_server.compile.profiles.
 COMPILER_SNAPSHOT = "paw-4b-qwen3-0.6b-20260407"
 RUNTIME_ID = "qwen3-0.6b-q6_k"
 
@@ -24,18 +28,24 @@ class CompileWorker:
         self._events: dict[str, threading.Event] = {}
         self._specs: dict[str, str] = {}
         self._pseudo_programs: dict[str, str | None] = {}
+        self._compilers: dict[str, str] = {}
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def submit(
-        self, program_id: str, spec: str, pseudo_program: str | None = None
+        self,
+        program_id: str,
+        spec: str,
+        pseudo_program: str | None = None,
+        compiler: str = DEFAULT_COMPILER,
     ) -> threading.Event:
         """Queue a compile (idempotent); returns the completion event.
 
         If ``pseudo_program`` is given, the compile pipeline skips running
         the untrained pseudo compiler and uses this text directly (backs
-        POST /api/v1/compile/raw).
+        POST /api/v1/compile/raw). ``compiler`` selects the published
+        compiler / interpreter pair (see paw_server.compile.profiles).
         """
         with self._lock:
             event = self._events.get(program_id)
@@ -48,7 +58,10 @@ class CompileWorker:
                 self._events[program_id] = event
                 self._specs[program_id] = spec
                 self._pseudo_programs[program_id] = pseudo_program
-                self._store.upsert(program_id, spec=spec, status="compiling")
+                self._compilers[program_id] = compiler
+                self._store.upsert(
+                    program_id, spec=spec, compiler=compiler, status="compiling"
+                )
                 self._queue.put(program_id)
         return event
 
@@ -63,13 +76,18 @@ class CompileWorker:
                 return
             spec = self._specs[program_id]
             pseudo_program = self._pseudo_programs.get(program_id)
+            compiler = self._compilers.get(program_id, DEFAULT_COMPILER)
             t0 = time.perf_counter()
             try:
                 from paw_server.compile.pipeline import compile_spec
 
                 out_dir = self._store.program_dir(program_id)
                 compile_spec(
-                    spec, out_dir, write_gguf=True, pseudo_program=pseudo_program
+                    spec,
+                    out_dir,
+                    write_gguf=True,
+                    pseudo_program=pseudo_program,
+                    compiler=compiler,
                 )
                 self._store.bundle_path(program_id)  # pre-build the ZIP
                 self._store.upsert(
@@ -90,3 +108,4 @@ class CompileWorker:
                     # Leave the event for late waiters; drop the spec.
                     self._specs.pop(program_id, None)
                     self._pseudo_programs.pop(program_id, None)
+                    self._compilers.pop(program_id, None)

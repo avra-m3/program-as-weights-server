@@ -20,6 +20,21 @@ A compiled "program" = a **pseudo-program** (plain text) + a **LoRA
 adapter** (28 layers × 7 modules × rank-64 A/B pairs ≈ 38.5M params,
 ~77 MB bf16, ~22 MB Q4_0-GGUF).
 
+There is also a **compact variant**, `programasweights/paw-4b-gpt2`
+(select it with `"compiler": "paw-4b-gpt2"`): same 4B compiler pair and
+mapper design, but the frozen interpreter is a 124M GPT-2. Per-compiler
+differences all live in `paw_server/compile/profiles.py` and are mirrored
+from that checkpoint's `lora_mapper.pt` and official program artifacts:
+12 layers × 4 Conv1D modules (`c_attn`, `attn.c_proj`, `mlp.c_fc`,
+`mlp.c_proj` — the mapper names them `c_attn`/`attn_c_proj`/`c_fc`/
+`mlp_c_proj` to disambiguate the two `c_proj`s), PEFT paths under
+`transformer.h.{i}`, GGUF arch `gpt2`
+(`attn_qkv`/`attn_output`/`ffn_up`/`ffn_down`), and a **plain-text**
+prompt template (GPT-2 has no chat template). Programs run on the
+`gpt2-q8_0` runtime. The compile pipeline is otherwise identical — the
+trained compiler is a Qwen3-4B either way, so only the interpreter dims,
+tensor naming and templating change.
+
 An important empirical fact (discovered here, implied by the paper):
 the *trained* compiler `C_L` **cannot generate text** — its LM ability
 collapsed during training (greedy output degenerates on any prompt, on
@@ -209,4 +224,6 @@ The downloaded bundle must contain at minimum `adapter.gguf` +
 `prompt_template.txt` + `meta.json` (the SDK's cache check requires the
 first two; its llama.cpp runtime consumes exactly these, resolving the
 base-model GGUF from `meta.json`'s `interpreter` field —
-`Qwen/Qwen3-0.6B` maps to the published `Qwen3-0.6B-GGUF-Q6_K`).
+`Qwen/Qwen3-0.6B` maps to the published `Qwen3-0.6B-GGUF-Q6_K`, `gpt2` to
+`GPT2-GGUF-Q8_0`). Program ids are per-compiler hashes, so the same spec
+compiled with both compilers yields two distinct programs.

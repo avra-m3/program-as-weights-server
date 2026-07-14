@@ -11,11 +11,14 @@ from fastapi import FastAPI, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from paw_server.compile.profiles import (
+    DEFAULT_COMPILER,
+    PROFILES,
+    get_profile,
+)
 from paw_server.compile.prompts import compiler_instructions
 from paw_server.store import ProgramStore, program_id_for
-from paw_server.worker import COMPILER_SNAPSHOT, RUNTIME_ID, CompileWorker
-
-DEFAULT_COMPILER = "paw-4b-qwen3-0.6b"
+from paw_server.worker import CompileWorker
 
 # How long POST /compile blocks waiting for the result. The SDK's client
 # timeout is 120 s; if we're still compiling at the deadline we return
@@ -23,11 +26,11 @@ DEFAULT_COMPILER = "paw-4b-qwen3-0.6b"
 # picks up from there.
 COMPILE_WAIT_S = 100
 
-# Mirrors the SDK's built-in manifest for this runtime
+# Mirrors the SDK's built-in manifests for these runtimes
 # (programasweights.cache.LEGACY_RUNTIME_MANIFESTS).
 RUNTIME_MANIFESTS = {
-    RUNTIME_ID: {
-        "runtime_id": RUNTIME_ID,
+    "qwen3-0.6b-q6_k": {
+        "runtime_id": "qwen3-0.6b-q6_k",
         "manifest_version": 1,
         "display_name": "Qwen3 0.6B (Q6_K)",
         "interpreter": "Qwen/Qwen3-0.6B",
@@ -51,7 +54,42 @@ RUNTIME_MANIFESTS = {
             "base_model": None,
             "prefix_cache_supported": False,
         },
-    }
+    },
+    "gpt2-q8_0": {
+        "runtime_id": "gpt2-q8_0",
+        "manifest_version": 1,
+        "display_name": "GPT-2 124M (Q8_0)",
+        "interpreter": "gpt2",
+        "adapter_format": "gguf_lora",
+        "local_sdk": {
+            "supported": True,
+            "base_model": {
+                "provider": "huggingface",
+                "repo": "programasweights/GPT2-GGUF-Q8_0",
+                "file": "gpt2-q8_0.gguf",
+                "url": (
+                    "https://huggingface.co/programasweights/"
+                    "GPT2-GGUF-Q8_0/resolve/main/gpt2-q8_0.gguf"
+                ),
+                "sha256": None,
+            },
+            "n_ctx": 2048,
+        },
+        "js_sdk": {
+            "supported": True,
+            "base_model": {
+                "provider": "huggingface",
+                "repo": "programasweights/GPT2-GGUF-Q8_0",
+                "file": "gpt2-q8_0.gguf",
+                "url": (
+                    "https://huggingface.co/programasweights/"
+                    "GPT2-GGUF-Q8_0/resolve/main/gpt2-q8_0.gguf"
+                ),
+                "sha256": None,
+            },
+            "prefix_cache_supported": True,
+        },
+    },
 }
 
 
@@ -77,14 +115,15 @@ def create_app(data_dir: str | Path) -> FastAPI:
     app = FastAPI(title="paw-server (local PAW compile)")
 
     def _program_response(entry: dict) -> dict:
+        profile = get_profile(entry.get("compiler", DEFAULT_COMPILER))
         return {
             "program_id": entry["program_id"],
             "status": entry.get("status", "unknown"),
             "slug": entry.get("slug"),
-            "compiler_snapshot": COMPILER_SNAPSHOT,
+            "compiler_snapshot": profile.snapshot,
             "compiler_kind": "lora",
             "pseudo_program_strategy": entry.get("pseudo_program_strategy", "examples"),
-            "runtime_id": RUNTIME_ID,
+            "runtime_id": profile.runtime_id,
             "runtime_manifest_version": 1,
             "timings": entry.get("timings"),
             "error": entry.get("error"),
@@ -99,21 +138,26 @@ def create_app(data_dir: str | Path) -> FastAPI:
         slug: str | None,
         pseudo_program: str | None = None,
     ):
-        compiler = compiler or DEFAULT_COMPILER
-        if compiler not in (DEFAULT_COMPILER, COMPILER_SNAPSHOT):
+        try:
+            profile = get_profile(compiler or DEFAULT_COMPILER)
+        except KeyError:
             return JSONResponse(
                 status_code=422,
                 content={"detail": f"Unknown compiler '{compiler}'."},
             )
 
+        # Fold the compiler into the program id so the same spec compiled for
+        # different interpreters (Qwen3 vs GPT-2) yields distinct programs.
         program_id = program_id_for(
-            spec, DEFAULT_COMPILER, name=name, slug=slug, pseudo_program=pseudo_program
+            spec, profile.name, name=name, slug=slug, pseudo_program=pseudo_program
         )
         existing = store.get(program_id)
         if existing and existing.get("status") == "compiled":
             entry = store.upsert(program_id, version_action="no_change")
         else:
-            event = worker.submit(program_id, spec, pseudo_program=pseudo_program)
+            event = worker.submit(
+                program_id, spec, pseudo_program=pseudo_program, compiler=profile.name
+            )
             event.wait(timeout=COMPILE_WAIT_S)
             entry = store.get(program_id) or {"program_id": program_id}
             entry["version_action"] = "created"
@@ -243,13 +287,14 @@ def create_app(data_dir: str | Path) -> FastAPI:
         return {
             "compilers": [
                 {
-                    "name": DEFAULT_COMPILER,
-                    "snapshot": COMPILER_SNAPSHOT,
+                    "name": profile.name,
+                    "snapshot": profile.snapshot,
                     "kind": "lora",
-                    "interpreter": "Qwen/Qwen3-0.6B",
-                    "runtime_id": RUNTIME_ID,
-                    "default": True,
+                    "interpreter": profile.interpreter,
+                    "runtime_id": profile.runtime_id,
+                    "default": profile.name == DEFAULT_COMPILER,
                 }
+                for profile in PROFILES.values()
             ]
         }
 

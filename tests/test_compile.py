@@ -12,6 +12,7 @@ from paw_server.compile.pipeline import (
     _input_device,
     interpreter_module_dims,
 )
+from paw_server.compile.profiles import GPT2, QWEN3_06B, get_profile
 from paw_server.compile.prompts import compiler_prompt, interpreter_prompt
 
 QWEN3_06B_DIMS = {
@@ -22,6 +23,14 @@ QWEN3_06B_DIMS = {
     "gate_proj": (1024, 3072),
     "up_proj": (1024, 3072),
     "down_proj": (3072, 1024),
+}
+
+# Shapes observed in programasweights/paw-4b-gpt2/lora_mapper.pt.
+GPT2_DIMS = {
+    "c_attn": (768, 2304),
+    "attn_c_proj": (768, 768),
+    "c_fc": (768, 3072),
+    "mlp_c_proj": (3072, 768),
 }
 
 
@@ -112,6 +121,59 @@ def test_interpreter_module_dims_qwen3_06b():
 
     assert interpreter_module_dims(Cfg()) == QWEN3_06B_DIMS
     assert set(QWEN3_06B_DIMS) == set(MODULE_PARENT)
+    assert QWEN3_06B.module_dims(Cfg()) == QWEN3_06B_DIMS
+
+
+def test_gpt2_module_dims():
+    class Cfg:
+        hidden_size = 768
+        n_inner = None  # GPT2Config default: 4 * n_embd
+
+    assert GPT2.module_dims(Cfg()) == GPT2_DIMS
+    assert set(GPT2_DIMS) == set(GPT2.peft_modules)
+
+
+def test_gpt2_mapper_state_dict_shapes_match_published_checkpoint():
+    """Constructed mapper must accept the paw-4b-gpt2 lora_mapper.pt layout."""
+    mapper = LoraMapper(
+        teacher_hidden_size=2560,
+        student_num_layers=12,
+        module_dims=GPT2_DIMS,
+        lora_rank=64,
+        lora_alpha=16.0,
+        num_bases=64,
+    )
+    sd = mapper.state_dict()
+    assert sd["coeff_head.weight"].shape == (6144, 2560)  # 12 * 4 * 64 * 2
+    assert sd["A_bases_c_attn"].shape == (64, 64, 768)
+    assert sd["B_bases_c_attn"].shape == (64, 2304, 64)
+    assert sd["A_bases_mlp_c_proj"].shape == (64, 64, 3072)
+    assert sd["B_bases_mlp_c_proj"].shape == (64, 768, 64)
+    assert len(sd) == 4 + 8  # trunk w/b, head w/b, 4 modules x (A, B)
+
+
+def test_profile_peft_keys_match_official_artifacts():
+    # Verified against programasweights/paw-programs adapter tensors.
+    assert (
+        QWEN3_06B.peft_key(3, "q_proj")
+        == "base_model.model.model.layers.3.self_attn.q_proj"
+    )
+    assert GPT2.peft_key(0, "c_attn") == "base_model.model.transformer.h.0.attn.c_attn"
+    assert (
+        GPT2.peft_key(11, "mlp_c_proj")
+        == "base_model.model.transformer.h.11.mlp.c_proj"
+    )
+
+
+def test_profile_resolution_by_name_and_snapshot():
+    assert get_profile("paw-4b-gpt2") is GPT2
+    assert get_profile("paw-4b-gpt2-20260406") is GPT2  # snapshot id
+    assert get_profile("paw-4b-qwen3-0.6b") is QWEN3_06B
+
+
+def test_gpt2_depth_ratio_every_third_layer():
+    # GPT-2: 12 student layers against the 36-layer compiler = every 3rd.
+    assert depth_ratio_layers(36, 12) == list(range(2, 36, 3))
 
 
 def test_gguf_adapter_roundtrip(tmp_path):
@@ -138,6 +200,37 @@ def test_gguf_adapter_roundtrip(tmp_path):
     assert list(tensors["blk.0.attn_q.weight.lora_a"].shape) == [1024, 64]
     assert list(tensors["blk.1.ffn_down.weight.lora_b"].shape) == [64, 1024]
     assert all(t.tensor_type.name == "Q4_0" for t in tensors.values())
+
+
+def test_gguf_adapter_gpt2_naming(tmp_path):
+    """Tensor names/arch verified against an official gpt2 adapter.gguf."""
+    import gguf
+
+    from paw_server.compile.gguf_export import write_gguf_adapter
+
+    lora = {
+        (0, "c_attn"): (torch.randn(64, 768), torch.randn(2304, 64)),
+        (0, "attn_c_proj"): (torch.randn(64, 768), torch.randn(768, 64)),
+        (11, "c_fc"): (torch.randn(64, 768), torch.randn(3072, 64)),
+        (11, "mlp_c_proj"): (torch.randn(64, 3072), torch.randn(768, 64)),
+    }
+    path = tmp_path / "adapter.gguf"
+    write_gguf_adapter(lora, path, lora_alpha=16.0, arch="gpt2")
+
+    reader = gguf.GGUFReader(str(path))
+    arch = reader.fields["general.architecture"]
+    assert arch.parts[arch.data[0]].tobytes() == b"gpt2"
+    names = {t.name for t in reader.tensors}
+    assert names == {
+        "blk.0.attn_qkv.weight.lora_a",
+        "blk.0.attn_qkv.weight.lora_b",
+        "blk.0.attn_output.weight.lora_a",
+        "blk.0.attn_output.weight.lora_b",
+        "blk.11.ffn_up.weight.lora_a",
+        "blk.11.ffn_up.weight.lora_b",
+        "blk.11.ffn_down.weight.lora_a",
+        "blk.11.ffn_down.weight.lora_b",
+    }
 
 
 class _FakeModel:
