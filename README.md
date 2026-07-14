@@ -52,6 +52,9 @@ verbatim from the paper's appendix and the authors' research code.
   Inference (running an already-compiled program) is cheap — only the 0.6B
   interpreter + adapter is loaded.
 
+- Tested on CUDA (Linux) and MPS (macOS). The pipeline autodetects the
+  available device (`torch.cuda` → `torch.mps` → `cpu`).
+
 ## Setup
 
 ```bash
@@ -91,6 +94,9 @@ Defaults: `--host 127.0.0.1`, `--port 8100`, `--data-dir data/server`
 ```bash
 docker build -t paw-server .
 docker run -p 8100:8100 \
+    --runtime nvidia \
+    -e NVIDIA_VISIBLE_DEVICES=all \
+    -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
     paw-server
 ```
