@@ -108,6 +108,13 @@ curl -X POST http://127.0.0.1:8100/api/v1/compile \
     -d '{"spec": "Classify text sentiment as positive or negative."}'
 ```
 
+Two compilers are available (see `GET /api/v1/models/compilers`): the
+default `paw-4b-qwen3-0.6b` (programs run on the Qwen3-0.6B interpreter)
+and the compact `paw-4b-gpt2` (programs run on a 124M GPT-2 — smaller and
+faster at inference, weaker on hard tasks). Pass `"compiler":
+"paw-4b-gpt2"` to target it; the same spec compiled with a different
+compiler yields a distinct program id and its own runtime (`gpt2-q8_0`).
+
 Response (`CompileRequest` -> program response):
 
 ```json
@@ -205,9 +212,11 @@ those terms is the user's responsibility:
 
 - [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) — pseudo compiler base
 - [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) — interpreter base
-- [`programasweights/paw-4b-qwen3-0.6b`](https://huggingface.co/programasweights/paw-4b-qwen3-0.6b) — trained compiler + mapper
+- [`programasweights/paw-4b-qwen3-0.6b`](https://huggingface.co/programasweights/paw-4b-qwen3-0.6b) — trained compiler + mapper (default)
+- [`programasweights/paw-4b-gpt2`](https://huggingface.co/programasweights/paw-4b-gpt2) — trained compact compiler + mapper (GPT-2 interpreter)
 - [`programasweights/paw-programs`](https://huggingface.co/programasweights/paw-programs) — published program artifacts
 - [`programasweights/Qwen3-0.6B-GGUF-Q6_K`](https://huggingface.co/programasweights/Qwen3-0.6B-GGUF-Q6_K) — runtime interpreter (GGUF)
+- [`programasweights/GPT2-GGUF-Q8_0`](https://huggingface.co/programasweights/GPT2-GGUF-Q8_0) — compact runtime interpreter (GGUF)
 - [`wtzhang-nlp/fuzzy_bench`](https://huggingface.co/datasets/wtzhang-nlp/fuzzy_bench) — FuzzyBench dataset (training/eval only)
 
 > [!WARNING]

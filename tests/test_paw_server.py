@@ -13,14 +13,17 @@ from paw_server.store import program_id_for
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    def fake_compile_spec(spec, out_dir, pseudo_program=None, **kwargs):
+    def fake_compile_spec(
+        spec, out_dir, pseudo_program=None, compiler="paw-4b-qwen3-0.6b", **kwargs
+    ):
+        interpreter = "gpt2" if compiler == "paw-4b-gpt2" else "Qwen/Qwen3-0.6B"
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "adapter.gguf").write_bytes(b"GGUF-fake")
         (out_dir / "prompt_template.txt").write_text(
             "x\n\n[INPUT]\n{INPUT_PLACEHOLDER}\n[END_INPUT]"
         )
         (out_dir / "meta.json").write_text(
-            json.dumps({"interpreter": "Qwen/Qwen3-0.6B", "spec": spec})
+            json.dumps({"interpreter": interpreter, "spec": spec})
         )
         (out_dir / "pseudo_program.txt").write_text(
             pseudo_program.strip() if pseudo_program else "[PSEUDO_PROGRAM]..."
@@ -74,6 +77,24 @@ def test_unknown_compiler_is_422(client):
     assert r.status_code == 422
 
 
+def test_compile_with_gpt2_compiler(client):
+    r = client.post(
+        "/api/v1/compile", json={"spec": "count words", "compiler": "paw-4b-gpt2"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # Distinct program id from the Qwen3 compile of the same spec.
+    assert body["program_id"] == program_id_for("count words", "paw-4b-gpt2")
+    assert body["program_id"] != program_id_for("count words", "paw-4b-qwen3-0.6b")
+    assert body["status"] == "compiled"
+    assert body["runtime_id"] == "gpt2-q8_0"
+    assert body["compiler_snapshot"] == "paw-4b-gpt2-20260406"
+
+    meta = client.get(f"/api/v1/programs/{body['program_id']}").json()
+    assert meta["interpreter"] == "gpt2"
+    assert meta["runtime_id"] == "gpt2-q8_0"
+
+
 def test_download_bundle_is_zip_with_required_files(client):
     pid = client.post("/api/v1/compile", json={"spec": "s"}).json()["program_id"]
     r = client.get(f"/api/v1/programs/{pid}/download")
@@ -105,6 +126,21 @@ def test_runtime_manifest_matches_sdk_expectations(client):
     m = r.json()
     assert m["local_sdk"]["supported"] is True
     assert m["local_sdk"]["base_model"]["file"] == "qwen3-0.6b-q6_k.gguf"
+
+    r = client.get("/api/v1/models/runtimes/gpt2-q8_0")
+    assert r.status_code == 200
+    m = r.json()
+    assert m["interpreter"] == "gpt2"
+    assert m["local_sdk"]["base_model"]["file"] == "gpt2-q8_0.gguf"
+
+
+def test_list_compilers_includes_both_runtimes(client):
+    compilers = client.get("/api/v1/models/compilers").json()["compilers"]
+    by_name = {c["name"]: c for c in compilers}
+    assert set(by_name) == {"paw-4b-qwen3-0.6b", "paw-4b-gpt2"}
+    assert by_name["paw-4b-qwen3-0.6b"]["default"] is True
+    assert by_name["paw-4b-gpt2"]["default"] is False
+    assert by_name["paw-4b-gpt2"]["runtime_id"] == "gpt2-q8_0"
 
 
 def test_program_meta(client):
