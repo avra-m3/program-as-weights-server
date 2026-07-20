@@ -64,6 +64,17 @@ class CompilerProfile:
     peft_modules: dict[str, str]  # mapper module -> path inside a layer
     chat_template: bool  # wrap interpreter prompt in tokenizer chat template?
     meta_prefix_steps: int | None  # prefix_steps value in program meta.json
+    # Hard ceiling on interpreter-side sequence length: pseudo_program +
+    # [INPUT]/[END_INPUT] wrapper + the caller's input + the generated
+    # output. Mirrors the paper's Appendix G training config ("max
+    # interpreter sequence length 1024"), applied uniformly across all
+    # three published interpreters. For GPT-2 this is also the model's
+    # actual n_positions (a fixed 1024-row learned absolute position-
+    # embedding table — unlike Qwen3's RoPE, there is no graceful way to
+    # exceed it at inference time). Used both to size the runtime
+    # manifest's n_ctx and to bound the pseudo-program at compile time
+    # (see compile_spec's budget check in pipeline.py).
+    max_interpreter_tokens: int
     module_dims: Callable[..., dict[str, tuple[int, int]]] = field(repr=False)
 
     def peft_key(self, layer: int, module: str) -> str:
@@ -89,6 +100,10 @@ QWEN3_06B = CompilerProfile(
     },
     chat_template=True,
     meta_prefix_steps=None,
+    # Qwen3 uses RoPE, so unlike GPT-2 there's no hard architectural wall
+    # at the paper's 1024-token training length; 2048 is a serving-side
+    # headroom choice, not a correctness requirement.
+    max_interpreter_tokens=2048,
     module_dims=qwen3_module_dims,
 )
 
@@ -108,6 +123,12 @@ GPT2 = CompilerProfile(
     },
     chat_template=False,
     meta_prefix_steps=64,
+    # GPT-2's wpe table has exactly 1024 rows: this is a hard ceiling, not
+    # a tunable serving parameter. It also happens to be exactly what the
+    # paper's own training config caps every interpreter at (Appendix G),
+    # so this isn't a workaround -- GPT-2 was never asked to exceed the
+    # budget the whole system was already designed around.
+    max_interpreter_tokens=1024,
     module_dims=gpt2_module_dims,
 )
 

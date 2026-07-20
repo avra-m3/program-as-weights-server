@@ -35,6 +35,28 @@ prompt template (GPT-2 has no chat template). Programs run on the
 trained compiler is a Qwen3-4B either way, so only the interpreter dims,
 tensor naming and templating change.
 
+**GPT-2's 1024-token ceiling is enforced, not worked around.** The
+paper's Appendix G training config caps *every* interpreter — Qwen3
+0.6B, Qwen3.5 0.8B, and GPT-2 124M alike — at "max interpreter sequence
+length 1024"; GPT-2 was simply never asked to exceed a budget the whole
+system was already designed around. `CompilerProfile.max_interpreter_tokens`
+(`profiles.py`) encodes this per compiler (1024 for GPT-2, matching its
+fixed 1024-row learned absolute position-embedding table exactly — there
+is no RoPE-style extrapolation available for it; 2048 for Qwen3, which
+has genuine RoPE headroom beyond its own training length). It's used in
+two places: `RUNTIME_MANIFESTS[...]["local_sdk"]["n_ctx"]` in `app.py`
+(previously hardcoded to 2048 for both compilers — a bug for GPT-2, since
+that exceeds its real limit), and a compile-time budget check in
+`compile_spec` that reserves 256 tokens of headroom for
+`[INPUT]`/`[END_INPUT]` plus the (not-yet-known) input and generated
+output. If the pseudo-program alone would overflow that budget: a
+caller-supplied pseudo-program (`POST /compile/raw`) fails the compile
+immediately (there's no text to safely rewrite on the caller's behalf);
+a generated one is retried up to twice with an explicit "be shorter"
+instruction appended to the compiler prompt before the compile fails.
+Programs record `max_interpreter_tokens`, `pseudo_program_tokens`, and
+`pseudo_program_regenerated` in `meta.json` for visibility.
+
 An important empirical fact (discovered here, implied by the paper):
 the *trained* compiler `C_L` **cannot generate text** — its LM ability
 collapsed during training (greedy output degenerates on any prompt, on

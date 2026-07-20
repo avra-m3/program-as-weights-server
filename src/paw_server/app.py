@@ -13,7 +13,9 @@ from pydantic import BaseModel
 
 from paw_server.compile.profiles import (
     DEFAULT_COMPILER,
+    GPT2,
     PROFILES,
+    QWEN3_06B,
     get_profile,
 )
 from paw_server.compile.prompts import compiler_instructions
@@ -47,7 +49,7 @@ RUNTIME_MANIFESTS = {
                 ),
                 "sha256": None,
             },
-            "n_ctx": 2048,
+            "n_ctx": QWEN3_06B.max_interpreter_tokens,
         },
         "js_sdk": {
             "supported": False,
@@ -73,7 +75,11 @@ RUNTIME_MANIFESTS = {
                 ),
                 "sha256": None,
             },
-            "n_ctx": 2048,
+            # GPT-2's learned absolute position embeddings top out at
+            # exactly 1024 rows (see profiles.GPT2.max_interpreter_tokens);
+            # unlike Qwen3's RoPE there's no graceful way to serve past
+            # this, so n_ctx must match the model's actual n_positions.
+            "n_ctx": GPT2.max_interpreter_tokens,
         },
         "js_sdk": {
             "supported": True,

@@ -58,6 +58,22 @@ from paw_server.compile.prompts import (  # noqa: E402
 PSEUDO_COMPILER_REPO = "Qwen/Qwen3-4B-Instruct-2507"
 PREFIX_STEPS = 64
 
+# Headroom reserved, out of each profile's max_interpreter_tokens, for the
+# [INPUT]/[END_INPUT] wrapper plus the caller's (not-yet-known-at-compile-
+# time) input and the interpreter's generated output. The pseudo-program
+# itself is asked to stay under ~250 tokens (prompts.py COMPILER_EXAMPLES)
+# but that's a soft instruction to an untrained model, not enforced -- this
+# is the hard backstop so a compiled program can't already be guaranteed to
+# overflow the interpreter's budget before a single input token is added.
+INTERPRETER_IO_RESERVE_TOKENS = 256
+
+# How many times to regenerate an over-budget pseudo-program (with an
+# added "be shorter" instruction) before giving up. Applies only to the
+# generated ("examples") path -- a caller-supplied pseudo-program
+# (POST /compile/raw) that's over budget fails immediately since there's
+# nothing to regenerate.
+PSEUDO_PROGRAM_MAX_RETRIES = 2
+
 # PEFT module name -> submodule path inside a Qwen3 decoder layer. Retained for
 # the default (Qwen3) compiler and referenced by tests; per-compiler PEFT paths
 # now live in paw_server.compile.profiles.
@@ -344,11 +360,44 @@ def compile_spec(
     int_config = AutoConfig.from_pretrained(interpreter_id)
     module_dims = profile.module_dims(int_config)
     num_student_layers = int_config.num_hidden_layers
+    int_tokenizer = AutoTokenizer.from_pretrained(interpreter_id)
+
+    # Interpreter-side token budget (paper Appendix G: "max interpreter
+    # sequence length 1024", applied to every published interpreter
+    # including GPT-2). Reserve headroom for the [INPUT]/[END_INPUT]
+    # wrapper plus the caller's input and the generated output, neither of
+    # which are known yet at compile time. We never truncate a
+    # pseudo-program to fit -- silently chopping text can leave a broken
+    # format (missing closing marker, a cut-off example) baked into the
+    # program. Instead: a caller-supplied pseudo-program that's over
+    # budget is a hard compile error (we can't rewrite the caller's text
+    # for them); a generated one is retried with feedback before giving up.
+    pseudo_budget = profile.max_interpreter_tokens - INTERPRETER_IO_RESERVE_TOKENS
+
+    def _token_count(text: str) -> int:
+        return len(int_tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    def _budget_error(tokens: int, extra: str) -> ValueError:
+        return ValueError(
+            f"pseudo-program is {tokens} tokens, over the "
+            f"{profile.interpreter} interpreter's budget of {pseudo_budget} "
+            f"tokens ({profile.max_interpreter_tokens} max_interpreter_tokens "
+            f"minus {INTERPRETER_IO_RESERVE_TOKENS} reserved for "
+            f"[INPUT]/[END_INPUT] plus the caller's input and generated "
+            f"output). {extra}"
+        )
+
+    pseudo_program_regenerated = False
 
     if pseudo_program_provided:
         # --- 1 (skipped). Caller supplied the pseudo-program directly.
         pseudo_program = pseudo_program.strip()
         print("Using caller-supplied pseudo-program; skipping pseudo compiler.")
+        pseudo_program_tokens = _token_count(pseudo_program)
+        if pseudo_program_tokens > pseudo_budget:
+            raise _budget_error(
+                pseudo_program_tokens, "Supply a shorter pseudo_program and retry."
+            )
     else:
         # --- 1. Generate the pseudo-program with the *untrained* pseudo
         # compiler (paper §3.1: "an off-the-shelf Qwen3-4B-Instruct-2507
@@ -362,29 +411,62 @@ def compile_spec(
         ps_model = _load_model(PSEUDO_COMPILER_REPO, device)
         print(f"  loaded in {time.perf_counter() - t0:.1f}s")
 
-        gen_prompt = _render_chat(
-            ps_tokenizer, compiler_prompt(spec, style=pseudo_style)
-        )
-        gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(
-            _input_device(ps_model, device)
-        )
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            gen_out = ps_model.generate(
-                **gen_inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=ps_tokenizer.pad_token_id or ps_tokenizer.eos_token_id,
+        base_prompt_text = compiler_prompt(spec, style=pseudo_style)
+        retry_note = ""
+        pseudo_program = ""
+        pseudo_program_tokens = 0
+
+        for attempt in range(PSEUDO_PROGRAM_MAX_RETRIES + 1):
+            gen_prompt = _render_chat(ps_tokenizer, base_prompt_text + retry_note)
+            gen_inputs = ps_tokenizer(gen_prompt, return_tensors="pt").to(
+                _input_device(ps_model, device)
             )
-        new_tokens = gen_out[0, gen_inputs["input_ids"].shape[1] :]
-        pseudo_program = ps_tokenizer.decode(
-            new_tokens, skip_special_tokens=True
-        ).strip()
-        print(
-            f"  pseudo-program: {len(new_tokens)} tokens "
-            f"in {time.perf_counter() - t0:.1f}s"
-        )
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                gen_out = ps_model.generate(
+                    **gen_inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=ps_tokenizer.pad_token_id or ps_tokenizer.eos_token_id,
+                )
+            new_tokens = gen_out[0, gen_inputs["input_ids"].shape[1] :]
+            pseudo_program = ps_tokenizer.decode(
+                new_tokens, skip_special_tokens=True
+            ).strip()
+            print(
+                f"  pseudo-program: {len(new_tokens)} tokens "
+                f"in {time.perf_counter() - t0:.1f}s"
+            )
+            pseudo_program_tokens = _token_count(pseudo_program)
+            if pseudo_program_tokens <= pseudo_budget:
+                break
+
+            pseudo_program_regenerated = True
+            if attempt < PSEUDO_PROGRAM_MAX_RETRIES:
+                print(
+                    f"  pseudo-program is {pseudo_program_tokens} interpreter "
+                    f"tokens, over the {profile.interpreter} budget of "
+                    f"{pseudo_budget}; retrying "
+                    f"({attempt + 1}/{PSEUDO_PROGRAM_MAX_RETRIES}) with a "
+                    "shorter-output instruction..."
+                )
+                retry_note = (
+                    "\n\nIMPORTANT: Your previous pseudo-program was "
+                    f"{pseudo_program_tokens} tokens, too long for the target "
+                    f"interpreter (limit ~{pseudo_budget} tokens). Rewrite it "
+                    "to be substantially shorter: use only 2-3 examples and a "
+                    "terser task description, while keeping the exact same "
+                    "format and closing marker."
+                )
+
         _free_model(ps_model, device)
+
+        if pseudo_program_tokens > pseudo_budget:
+            raise _budget_error(
+                pseudo_program_tokens,
+                f"Still over budget after {PSEUDO_PROGRAM_MAX_RETRIES} "
+                "regeneration attempts; try a shorter/simpler spec.",
+            )
 
     # --- 2. Prefix-hidden forward pass through the *trained* compiler.
     # Sequence: [chat(minimal(spec))] [pseudo] [EOS] [prefix tokens]; the
@@ -457,7 +539,6 @@ def compile_spec(
     # (matches official paw-programs artifacts for both runtimes).
     template = interpreter_prompt(pseudo_program, "{INPUT_PLACEHOLDER}")
     if profile.chat_template:
-        int_tokenizer = AutoTokenizer.from_pretrained(interpreter_id)
         template = int_tokenizer.apply_chat_template(
             [{"role": "user", "content": template}],
             add_generation_prompt=True,
@@ -481,6 +562,9 @@ def compile_spec(
                 "lora_rank": lora_rank,
                 "lora_alpha": lora_alpha,
                 "prefix_steps": profile.meta_prefix_steps,
+                "max_interpreter_tokens": profile.max_interpreter_tokens,
+                "pseudo_program_tokens": pseudo_program_tokens,
+                "pseudo_program_regenerated": pseudo_program_regenerated,
                 "created_at": datetime.datetime.now(datetime.UTC).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
